@@ -291,7 +291,7 @@ While the scan runs, each check reports as it finishes — position, ID, outcome
 
    Domain        contoso.local
    Controller    dc01.contoso.local
-   Running as    CONTOSO\s.gassner
+   Running as    CONTOSO\s.sampleaccount
    Stale after   90 days
    Checks        14 of 43   (2 slow - these read a security descriptor per object)
 
