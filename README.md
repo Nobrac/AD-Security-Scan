@@ -535,8 +535,6 @@ You cannot — the menu refuses ranges and tells you why. At the top level `1` m
 ```
 README.md                                 this file
 LICENSE                                   MIT
-.gitignore                                keeps generated reports out of git
-ADSecurityScan.exceptions.example.json    template for approved exceptions
 Invoke-ADSecurityScan.ps1                 the scanner — everything is in this one file
 ```
 
