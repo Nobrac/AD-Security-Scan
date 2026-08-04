@@ -136,7 +136,22 @@ param(
     [switch] $Quiet,
 
     # Emit the finding objects on the pipeline for further processing.
-    [switch] $PassThru
+    [switch] $PassThru,
+
+    # Path to the approved-exception file. Defaults to
+    # ADSecurityScan.exceptions.json next to this script, if present.
+    [string] $ExceptionFile,
+
+    # Ignore the exception file even if one exists.
+    [switch] $NoExceptions,
+
+    # Skip checks whose scope is the whole forest (certificate services).
+    # Useful when scanning several domains of the same forest in sequence.
+    [switch] $SkipForestWide,
+
+    # Define functions and the catalogue, then return without scanning.
+    # Used by the Pester tests to dot-source the script on any platform.
+    [switch] $InitializeOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -226,11 +241,117 @@ $script:AnyEku         = '2.5.29.37.0'
 $script:EnrollRight    = '0e10c968-78fb-11d2-90d4-00c04f79dc55'
 $script:AutoEnrollRight = 'a05b8cc2-17bc-4802-a710-e7c15ab866a2'
 
+# Microsoft documentation per check. Every direct link below was verified to
+# resolve; where Microsoft has no single canonical page for a topic, the entry
+# points at a Microsoft Learn search with precise terms instead of at a guessed
+# URL that might rot into a 404.
+$script:Doc = @{
+    Gmsa        = @{ Title = 'Group Managed Service Accounts overview'
+                     Url   = 'https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/group-managed-service-accounts/group-managed-service-accounts/group-managed-service-accounts-overview' }
+    AdminSd     = @{ Title = 'Appendix C: Protected Accounts and Groups in Active Directory'
+                     Url   = 'https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/appendix-c--protected-accounts-and-groups-in-active-directory' }
+    PrivGroups  = @{ Title = 'Appendix B: Privileged Accounts and Groups in Active Directory'
+                     Url   = 'https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/appendix-b--privileged-accounts-and-groups-in-active-directory' }
+    AttackSurf  = @{ Title = 'Reducing the Active Directory Attack Surface'
+                     Url   = 'https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/plan/security-best-practices/reducing-the-active-directory-attack-surface' }
+    Krbtgt      = @{ Title = 'AD Forest Recovery: Reset the krbtgt password'
+                     Url   = 'https://learn.microsoft.com/en-us/windows-server/identity/ad-ds/manage/forest-recovery-guide/ad-forest-recovery-reset-the-krbtgt-password' }
+    Laps        = @{ Title = 'Key concepts in Windows LAPS'
+                     Url   = 'https://learn.microsoft.com/en-us/windows-server/identity/laps/laps-concepts-overview' }
+    Protected   = @{ Title = 'Protected Users Security Group'
+                     Url   = 'https://learn.microsoft.com/en-us/windows-server/security/credentials-protection-and-management/protected-users-security-group' }
+    Silos       = @{ Title = 'Authentication Policies and Authentication Policy Silos'
+                     Url   = 'https://learn.microsoft.com/en-us/windows-server/security/credentials-protection-and-management/authentication-policies-and-authentication-policy-silos' }
+    Delegation  = @{ Title = 'Get rid of accounts that use Kerberos unconstrained delegation'
+                     Url   = 'https://learn.microsoft.com/en-us/archive/blogs/389thoughts/get-rid-of-accounts-that-use-kerberos-unconstrained-delegation' }
+    CertBinding = @{ Title = 'KB5014754: Certificate-based authentication changes on Windows domain controllers'
+                     Url   = 'https://support.microsoft.com/en-us/topic/kb5014754-certificate-based-authentication-changes-on-windows-domain-controllers-ad2c23b0-15d8-4340-a468-4d4f3b188f16' }
+    CPassword   = @{ Title = 'MS14-025: Vulnerability in Group Policy Preferences (includes the cleanup script)'
+                     Url   = 'https://support.microsoft.com/en-us/help/2962486/ms14-025-vulnerability-in-group-policy-preferences-could-allow-elevati' }
+    SidFilter   = @{ Title = 'Configuring SID Filtering Settings: Domain and Forest Trusts'
+                     Url   = 'https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-server-2003/cc772633(v=ws.10)' }
+    EncTypes    = @{ Title = 'Network security: Configure encryption types allowed for Kerberos'
+                     Url   = 'https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/security-policy-settings/network-security-configure-encryption-types-allowed-for-kerberos' }
+    Reversible  = @{ Title = 'Store passwords using reversible encryption'
+                     Url   = 'https://learn.microsoft.com/en-us/windows/security/threat-protection/security-policy-settings/store-passwords-using-reversible-encryption' }
+    CredProt    = @{ Title = 'Credentials Protection and Management'
+                     Url   = 'https://learn.microsoft.com/en-us/windows-server/security/credentials-protection-and-management/credentials-protection-and-management' }
+
+    # Search-based entries: Microsoft has no single canonical page for these, so
+    # the link opens a Learn search with the right terms rather than guessing.
+    PwdPolicy   = @{ Title = 'Microsoft Learn: password policy settings'
+                     Url   = 'https://learn.microsoft.com/en-us/search/?terms=password%20policy%20security%20policy%20settings' }
+    Maq         = @{ Title = 'Microsoft Learn: ms-DS-MachineAccountQuota'
+                     Url   = 'https://learn.microsoft.com/en-us/search/?terms=ms-DS-MachineAccountQuota' }
+    FuncLevel   = @{ Title = 'Microsoft Learn: Active Directory functional levels'
+                     Url   = 'https://learn.microsoft.com/en-us/search/?terms=Active%20Directory%20forest%20and%20domain%20functional%20levels' }
+    Delegate    = @{ Title = 'Microsoft Learn: delegating administration of AD objects'
+                     Url   = 'https://learn.microsoft.com/en-us/search/?terms=delegating%20administration%20Active%20Directory%20organizational%20units' }
+    GpoDelegate = @{ Title = 'Microsoft Learn: delegating Group Policy management'
+                     Url   = 'https://learn.microsoft.com/en-us/search/?terms=delegating%20Group%20Policy%20Object%20permissions' }
+    AdcsDesign  = @{ Title = 'Microsoft Learn: certificate template security and enrollment permissions'
+                     Url   = 'https://learn.microsoft.com/en-us/search/?terms=certificate%20template%20security%20enrollment%20permissions%20AD%20CS' }
+    AdcsRoles   = @{ Title = 'Microsoft Learn: role-based administration for certification authorities'
+                     Url   = 'https://learn.microsoft.com/en-us/search/?terms=certification%20authority%20role-based%20administration' }
+    AdcsAgent   = @{ Title = 'Microsoft Learn: restricted enrollment agents'
+                     Url   = 'https://learn.microsoft.com/en-us/search/?terms=restricted%20enrollment%20agent%20certificate%20services' }
+    AdcsSan     = @{ Title = 'Microsoft Learn: EDITF_ATTRIBUTESUBJECTALTNAME2'
+                     Url   = 'https://learn.microsoft.com/en-us/search/?terms=EDITF_ATTRIBUTESUBJECTALTNAME2' }
+}
+
+# Which document belongs to which check.
+$script:CheckDoc = @{
+    'KRB-001'   = 'Gmsa'
+    'KRB-002'   = 'AttackSurf'
+    'KRB-003'   = 'Krbtgt'
+    'KRB-004'   = 'EncTypes'
+    'DEL-001'   = 'Delegation'
+    'DEL-002'   = 'Delegation'
+    'DEL-003'   = 'Delegation'
+    'PRIV-001'  = 'PrivGroups'
+    'PRIV-002'  = 'Protected'
+    'PRIV-003'  = 'AdminSd'
+    'PWD-001'   = 'Gmsa'
+    'PWD-002'   = 'AttackSurf'
+    'PWD-003'   = 'Reversible'
+    'PWD-004'   = 'Gmsa'
+    'PWD-005'   = 'PwdPolicy'
+    'ACC-001'   = 'AttackSurf'
+    'ACC-002'   = 'AttackSurf'
+    'ACC-003'   = 'SidFilter'
+    'ACC-004'   = 'CredProt'
+    'INF-001'   = 'Maq'
+    'INF-002'   = 'FuncLevel'
+    'INF-003'   = 'AttackSurf'
+    'INF-004'   = 'Laps'
+    'TRUST-001' = 'SidFilter'
+    'GPO-001'   = 'CPassword'
+    'ACL-001'   = 'AttackSurf'
+    'ACL-002'   = 'PrivGroups'
+    'ACL-003'   = 'AdminSd'
+    'ACL-004'   = 'AdminSd'
+    'ACL-005'   = 'Delegate'
+    'ACL-006'   = 'AttackSurf'
+    'ACL-007'   = 'Silos'
+    'ACL-008'   = 'GpoDelegate'
+    'ACL-009'   = 'PrivGroups'
+    'ADCS-001'  = 'AdcsRoles'
+    'ADCS-002'  = 'AdcsDesign'
+    'ADCS-003'  = 'AdcsDesign'
+    'ADCS-004'  = 'AdcsAgent'
+    'ADCS-005'  = 'AdcsDesign'
+    'ADCS-006'  = 'AdcsRoles'
+    'ADCS-007'  = 'AdcsSan'
+    'ADCS-008'  = 'CertBinding'
+    'ADCS-009'  = 'AdcsDesign'
+}
+
 # Caches - several checks need the same expensive lookups.
 $script:Cache = @{
     Domain      = $null
     PrivGroups  = $null
     PrivUsers   = $null
+    DcObjects   = $null
     TrustedSids = $null
     LowPrivSids = $null
     AdcsPaths   = 'unset'
@@ -241,11 +362,6 @@ $script:Cache = @{
 #############################################################################
 # REGION: Core helpers
 #############################################################################
-
-function Write-Step {
-    param([string] $Message, [string] $Color = 'Gray')
-    Write-Host ('  [{0}] {1}' -f (Get-Date -Format 'HH:mm:ss'), $Message) -ForegroundColor $Color
-}
 
 function Get-ADHParameter {
     <# Common splat for every AD cmdlet, so Server/Credential are set in one place. #>
@@ -287,6 +403,12 @@ function New-ADHFinding {
     # would report one phantom object on every clean check. Filter explicitly.
     $clean = @($Objects | Where-Object { $null -ne $_ })
 
+    # Attach the matching Microsoft documentation, if the check has one.
+    $reference = $null
+    if ($script:CheckDoc.ContainsKey($Id)) {
+        $reference = $script:Doc[$script:CheckDoc[$Id]]
+    }
+
     [PSCustomObject]@{
         PSTypeName  = 'ADSecurityScan.Finding'
         Id          = $Id
@@ -296,6 +418,7 @@ function New-ADHFinding {
         Count       = $clean.Count
         Summary     = $Summary
         Remediation = $Remediation
+        Reference   = $reference
         Objects     = $clean
     }
 }
@@ -378,7 +501,9 @@ function Get-ADHPrivilegedGroup {
 
     $result = foreach ($w in $wanted) {
         try {
-            $g = Get-ADGroup @p -Identity $w.Sid -Properties Name -ErrorAction Stop
+            # The security descriptor comes along here so the permission checks
+            # do not have to fetch it again object by object.
+            $g = Get-ADGroup @p -Identity $w.Sid -Properties Name, nTSecurityDescriptor -ErrorAction Stop
             [PSCustomObject]@{ Label = $w.Label; Group = $g }
         }
         catch {
@@ -391,14 +516,34 @@ function Get-ADHPrivilegedGroup {
 }
 
 function Get-ADHPrivilegedUser {
-    <# All user accounts flagged adminCount=1, cached. #>
+    <#
+        All user accounts flagged adminCount=1, cached, with the security
+        descriptor included. One LDAP query instead of one round trip per
+        account later on - in a domain with a few hundred privileged accounts
+        this is the single biggest runtime saving in the script.
+    #>
     if ($script:Cache.PrivUsers) { return $script:Cache.PrivUsers }
 
     $p = Get-ADHParameter
     $script:Cache.PrivUsers = @(Get-ADUser @p `
         -LDAPFilter '(&(objectCategory=person)(objectClass=user)(adminCount=1))' `
-        -Properties adminCount, Enabled, PasswordLastSet)
+        -Properties adminCount, Enabled, PasswordLastSet, nTSecurityDescriptor)
     return $script:Cache.PrivUsers
+}
+
+function Get-ADHDomainControllerObject {
+    <#
+        Domain controller computer objects including their security descriptor,
+        fetched in a single query. primaryGroupID 516 is "Domain Controllers",
+        521 is "Read-only Domain Controllers".
+    #>
+    if ($script:Cache.DcObjects) { return $script:Cache.DcObjects }
+
+    $p = Get-ADHParameter
+    $script:Cache.DcObjects = @(Get-ADComputer @p `
+        -LDAPFilter '(&(objectCategory=computer)(|(primaryGroupID=516)(primaryGroupID=521)))' `
+        -Properties nTSecurityDescriptor, operatingSystem, dNSHostName)
+    return $script:Cache.DcObjects
 }
 
 function Get-ADHTrustedSid {
@@ -790,6 +935,66 @@ function Test-ADHKrbtgtAge {
             -Details ('password last set: {0} ({1} days)' -f $krbtgt.PasswordLastSet, $age))
 }
 
+function Test-ADHWeakKerberosEncryption {
+    $p = Get-ADHParameter
+
+    # msDS-SupportedEncryptionTypes bits. An unset attribute means "domain
+    # default", which on anything below a 2008 functional level still includes
+    # RC4, so those accounts are reported as well when they hold an SPN.
+    $bits = @{
+        DesCrc  = 0x01
+        DesMd5  = 0x02
+        Rc4     = 0x04
+        Aes128  = 0x08
+        Aes256  = 0x10
+    }
+
+    $accounts = @(Get-ADObject @p `
+        -LDAPFilter '(&(|(objectCategory=person)(objectCategory=computer))(|(servicePrincipalName=*)(adminCount=1)))' `
+        -Properties sAMAccountName, objectClass, 'msDS-SupportedEncryptionTypes', servicePrincipalName, adminCount)
+
+    $objects = @()
+    $desCount = 0
+
+    foreach ($a in $accounts) {
+        $etype = Get-ADHProp $a 'msDS-SupportedEncryptionTypes'
+        $hasSpn = @(Get-ADHProp $a 'servicePrincipalName' @()).Count -gt 0
+        $priv   = ((Get-ADHProp $a 'adminCount' 0) -eq 1)
+
+        $issue = $null
+        if ($null -eq $etype -or [int]$etype -eq 0) {
+            # Nothing configured - the KDC falls back to the domain default.
+            if ($hasSpn) { $issue = 'no encryption types configured, KDC falls back to the domain default' }
+        }
+        else {
+            $e = [int]$etype
+            $des = (($e -band $bits.DesCrc) -ne 0) -or (($e -band $bits.DesMd5) -ne 0)
+            $aes = (($e -band $bits.Aes128) -ne 0) -or (($e -band $bits.Aes256) -ne 0)
+            $rc4 = (($e -band $bits.Rc4) -ne 0)
+
+            if ($des)              { $issue = 'DES enabled'; $desCount++ }
+            elseif ($rc4 -and -not $aes) { $issue = 'RC4 only, no AES' }
+        }
+
+        if (-not $issue) { continue }
+
+        $objects += New-ADHObject -Name (Get-ADHProp $a 'sAMAccountName' $a.Name) `
+            -DistinguishedName $a.DistinguishedName -Details (
+                '{0} | class: {1} | SPN: {2} | privileged: {3}' -f `
+                    $issue, $a.objectClass,
+                    $(if ($hasSpn) { 'yes' } else { 'no' }),
+                    $(if ($priv) { 'YES' } else { 'no' }))
+    }
+
+    $sev = if ($desCount -gt 0) { 'High' } elseif ($objects.Count -gt 0) { 'Medium' } else { 'Pass' }
+
+    New-ADHFinding -Id 'KRB-004' -Category 'Kerberos' -Severity $sev `
+        -Title 'Weak Kerberos encryption on accounts with an SPN or privileges' `
+        -Summary ('{0} accounts negotiate DES or RC4 rather than AES. RC4 service tickets crack orders of magnitude faster than AES, so this multiplies the impact of every finding in KRB-001. DES is broken outright and enabled on {1} of them.' -f $objects.Count, $desCount) `
+        -Remediation 'Set msDS-SupportedEncryptionTypes to AES128 and AES256 only (value 24) on service accounts, then reset the password so new keys are generated. Move the domain to AES-only once event 4769 shows no RC4 tickets in flight. Never leave DES enabled - no supported system requires it.' `
+        -Objects $objects
+}
+
 #############################################################################
 # REGION: Checks - Delegation
 #############################################################################
@@ -1143,6 +1348,58 @@ function Test-ADHSidHistory {
         -Objects $objects
 }
 
+function Test-ADHCredentialsInAttributes {
+    $p = Get-ADHParameter
+
+    # Deliberately broad, multilingual and case-insensitive. False positives are
+    # cheap to dismiss; a missed clear-text password is not.
+    $patterns = @(
+        'passwor[dt]', 'kennwort', 'passwd', '\bpwd\b', '\bpw\b', '\bpass\b',
+        'mot de passe', 'contrase', 'wachtwoord', 'credential', 'zugangsdaten',
+        'login.{0,12}[:=]', 'initialpassw', 'standardkennwort'
+    )
+    $regex = [regex]::new(($patterns -join '|'), 'IgnoreCase')
+
+    $fields = @('description', 'info', 'comment')
+
+    $accounts = @(Get-ADObject @p `
+        -LDAPFilter '(&(|(objectCategory=person)(objectCategory=computer)(objectCategory=group))(|(description=*)(info=*)(comment=*)))' `
+        -Properties sAMAccountName, description, info, comment, objectClass)
+
+    $objects = @()
+
+    foreach ($a in $accounts) {
+        $hits = @()
+        foreach ($f in $fields) {
+            $value = Get-ADHProp $a $f
+            if (-not $value) { continue }
+            # description is multi-valued in the schema.
+            foreach ($v in @($value)) {
+                if ([string]::IsNullOrWhiteSpace($v)) { continue }
+                $m = $regex.Match([string]$v)
+                if ($m.Success) {
+                    # The matched keyword is reported, never the field contents -
+                    # this report must not become the thing it warns about.
+                    $hits += ('{0} (keyword "{1}", {2} chars)' -f $f, $m.Value, ([string]$v).Length)
+                }
+            }
+        }
+        if (-not $hits.Count) { continue }
+
+        $objects += New-ADHObject -Name (Get-ADHProp $a 'sAMAccountName' $a.Name) `
+            -DistinguishedName $a.DistinguishedName `
+            -Details ('class: {0} | {1}' -f $a.objectClass, ($hits -join '; '))
+    }
+
+    $sev = if ($objects.Count -gt 5) { 'High' } elseif ($objects.Count -gt 0) { 'Medium' } else { 'Pass' }
+
+    New-ADHFinding -Id 'ACC-004' -Category 'Account hygiene' -Severity $sev `
+        -Title 'Possible credentials in description, info or comment attributes' `
+        -Summary ('{0} objects have text in a freely readable attribute that mentions passwords or credentials. Every authenticated user in the domain can read these fields, and enumerating them takes one LDAP query. Expect false positives - the point is that each one needs a human to look.' -f $objects.Count) `
+        -Remediation 'Review each hit and remove any credential from the attribute. Note that clearing it does not undo the exposure: treat every password found this way as compromised and rotate it. For the recurring cases (handover notes, service documentation) provide a password manager rather than a field in the directory. This check reports only the matched keyword, never the field contents.' `
+        -Objects $objects
+}
+
 #############################################################################
 # REGION: Checks - Infrastructure
 #############################################################################
@@ -1250,6 +1507,155 @@ function Test-ADHLapsCoverage {
 }
 
 #############################################################################
+# REGION: Checks - Trusts
+#############################################################################
+
+function Test-ADHTrustConfiguration {
+    $p = Get-ADHParameter
+
+    $trusts = @()
+    try   { $trusts = @(Get-ADTrust @p -Filter * -Properties *) }
+    catch { Write-Verbose ('Trusts could not be enumerated: {0}' -f $_.Exception.Message) }
+
+    if (-not $trusts.Count) {
+        return New-ADHFinding -Id 'TRUST-001' -Category 'Trusts' -Severity 'Pass' `
+            -Title 'Trust relationships' `
+            -Summary 'No trust relationships are defined for this domain.' `
+            -Remediation 'Nothing to do.'
+    }
+
+    $objects = @()
+    $critical = 0
+
+    foreach ($t in $trusts) {
+        $issues = @()
+
+        $intraForest  = [bool](Get-ADHProp $t 'IntraForest' $false)
+        $direction    = Get-ADHProp $t 'Direction' 'unknown'
+        $inbound      = ("$direction" -match 'Inbound|BiDirectional')
+        $quarantined  = [bool](Get-ADHProp $t 'SIDFilteringQuarantined' $false)
+        $forestAware  = [bool](Get-ADHProp $t 'SIDFilteringForestAware' $false)
+        $selectiveAuth = [bool](Get-ADHProp $t 'SelectiveAuthentication' $false)
+        $tgtDelegation = [bool](Get-ADHProp $t 'TGTDelegation' $false)
+
+        # SID filtering only matters where foreign SIDs can arrive, i.e. on
+        # inbound or bidirectional trusts that leave the forest.
+        if (-not $intraForest -and $inbound) {
+            $forestTrust = ("$(Get-ADHProp $t 'TrustType' '')" -match 'Forest') -or
+                           ("$(Get-ADHProp $t 'ForestTransitive' '')" -eq 'True')
+
+            if ($forestTrust) {
+                if ($forestAware) {
+                    $issues += 'SID history allowed across the forest trust (SID filtering relaxed)'
+                    $critical++
+                }
+            }
+            elseif (-not $quarantined) {
+                $issues += 'external trust without SID filtering quarantine'
+                $critical++
+            }
+
+            if (-not $selectiveAuth) {
+                $issues += 'no selective authentication - every principal from the trusted domain can authenticate everywhere'
+            }
+        }
+
+        if ($tgtDelegation) {
+            $issues += 'TGT delegation enabled - unconstrained delegation reaches across this trust'
+            $critical++
+        }
+
+        $detail = 'direction: {0} | type: {1} | intra-forest: {2}' -f `
+            $direction, (Get-ADHProp $t 'TrustType' 'unknown'), $(if ($intraForest) { 'yes' } else { 'no' })
+
+        if ($issues.Count) { $detail += ' | ISSUES: ' + ($issues -join '; ') }
+        else               { $detail += ' | no issues found' }
+
+        $objects += New-ADHObject -Name (Get-ADHProp $t 'Name' $t.DistinguishedName) `
+            -DistinguishedName $t.DistinguishedName -Details $detail
+    }
+
+    $withIssues = @($objects | Where-Object { $_.Details -match 'ISSUES' }).Count
+    $sev = if ($critical -gt 0) { 'Critical' } elseif ($withIssues -gt 0) { 'Medium' } else { 'Pass' }
+
+    New-ADHFinding -Id 'TRUST-001' -Category 'Trusts' -Severity $sev `
+        -Title 'Trust relationship configuration' `
+        -Summary ('{0} trust(s), {1} with findings. A trust without SID filtering lets the trusted side inject arbitrary SIDs - including those of your Domain Admins - which defeats the tier-0 separation inside this domain entirely.' -f $trusts.Count, $withIssues) `
+        -Remediation 'Enable SID filtering quarantine on external trusts (netdom trust /quarantine:yes) and keep SID history disabled on forest trusts (netdom trust /enablesidhistory:no). Disable TGT delegation (netdom trust /EnableTGTDelegation:No). Enable selective authentication where the trusted domain is not administered to your own standard, and treat any trust to a domain you do not control as an extension of your own attack surface.' `
+        -Objects $objects
+}
+
+#############################################################################
+# REGION: Checks - Group policy
+#############################################################################
+
+function Test-ADHSysvolCpassword {
+    <#
+        Group Policy Preferences could store credentials in SYSVOL, encrypted
+        with a key Microsoft published in the protocol documentation - so the
+        value is readable by every domain user. MS14-025 removed the ability to
+        create new ones, but existing files survive migrations and upgrades.
+
+        This check reports the presence and location of the attribute only. It
+        does not decrypt anything; the finding is that the file exists at all.
+    #>
+    $domain = Get-ADHDomain
+    $root = '\\{0}\SYSVOL\{0}\Policies' -f $domain.DNSRoot
+
+    if (-not (Test-Path -LiteralPath $root -ErrorAction SilentlyContinue)) {
+        return New-ADHFinding -Id 'GPO-001' -Category 'Group policy' -Severity 'Info' `
+            -Title 'Group policy preferences with stored credentials' `
+            -Summary ('SYSVOL could not be reached at {0}. The check needs SMB access to a domain controller.' -f $root) `
+            -Remediation 'Re-run from a system that can reach SYSVOL, or inspect the Policies folder manually for XML files containing a cpassword attribute.'
+    }
+
+    # The preference extensions that ever supported stored credentials.
+    $names = @('Groups.xml','Services.xml','ScheduledTasks.xml','DataSources.xml','Printers.xml','Drives.xml')
+    $objects = @()
+
+    try {
+        $files = @(Get-ChildItem -LiteralPath $root -Recurse -File -Include $names -ErrorAction SilentlyContinue)
+    }
+    catch {
+        $files = @()
+        Write-Verbose ('SYSVOL enumeration failed: {0}' -f $_.Exception.Message)
+    }
+
+    foreach ($f in $files) {
+        try {
+            $content = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop
+        }
+        catch { continue }
+
+        if ($content -notmatch 'cpassword\s*=\s*"[^"]+"') { continue }
+
+        # Report where it is and who it applies to - never the value.
+        $userName = ''
+        $m = [regex]::Match($content, '(?:runAs|userName|accountName|newName)\s*=\s*"([^"]*)"')
+        if ($m.Success) { $userName = $m.Groups[1].Value }
+
+        $gpoId = ''
+        $g = [regex]::Match($f.FullName, '\{[0-9A-Fa-f-]{36}\}')
+        if ($g.Success) { $gpoId = $g.Value }
+
+        $objects += New-ADHObject -Name $f.Name -DistinguishedName $f.FullName -Details (
+            'GPO: {0} | account: {1} | last written: {2}' -f `
+                $(if ($gpoId) { $gpoId } else { 'unknown' }),
+                $(if ($userName) { $userName } else { 'not stated' }),
+                $f.LastWriteTime.ToString('yyyy-MM-dd'))
+    }
+
+    $objects = @($objects)
+    $sev = if ($objects.Count -gt 0) { 'Critical' } else { 'Pass' }
+
+    New-ADHFinding -Id 'GPO-001' -Category 'Group policy' -Severity $sev `
+        -Title 'Group policy preferences with stored credentials (cpassword)' `
+        -Summary ('{0} policy file(s) in SYSVOL contain a cpassword attribute. The encryption key for this attribute is public, and SYSVOL is readable by every authenticated user, so these passwords should be considered known to anyone with a domain account.' -f $objects.Count) `
+        -Remediation 'Treat every account named in these files as compromised and rotate its password first - deleting the file does not undo the exposure. Then remove the preference item from the GPO (editing the GPO rewrites the XML; deleting the file directly leaves the policy broken). Use LAPS for local administrator passwords instead. This check reports file paths only and never decrypts the value.' `
+        -Objects $objects
+}
+
+#############################################################################
 # REGION: Checks - Directory permissions
 #############################################################################
 
@@ -1324,9 +1730,9 @@ function Test-ADHPrivilegedGroupAcl {
     $objects = @()
 
     foreach ($entry in Get-ADHPrivilegedGroup) {
-        $dn = $entry.Group.DistinguishedName
-        $sd = Get-ADHSecurityDescriptor -DistinguishedName $dn
+        $sd = Get-ADHProp $entry.Group 'nTSecurityDescriptor'
         if (-not $sd) { continue }
+        $dn = $entry.Group.DistinguishedName
 
         foreach ($ace in (Get-ADHDangerousAce -SecurityDescriptor $sd)) {
             $objects += New-ADHObject -Name $entry.Label -DistinguishedName $dn -Details (Format-ADHAce $ace)
@@ -1347,7 +1753,7 @@ function Test-ADHPrivilegedUserAcl {
     $objects = @()
 
     foreach ($a in (Get-ADHPrivilegedUser)) {
-        $sd = Get-ADHSecurityDescriptor -DistinguishedName $a.DistinguishedName
+        $sd = Get-ADHProp $a 'nTSecurityDescriptor'
         if (-not $sd) { continue }
 
         foreach ($ace in (Get-ADHDangerousAce -SecurityDescriptor $sd)) {
@@ -1415,23 +1821,25 @@ function Test-ADHOrganizationalUnitAcl {
 }
 
 function Test-ADHObjectOwnership {
-    $p = Get-ADHParameter
     $trusted = Get-ADHTrustedSid
     $objects = @()
 
     $targets = @()
     foreach ($entry in Get-ADHPrivilegedGroup) {
-        $targets += [PSCustomObject]@{ Name = $entry.Label; Dn = $entry.Group.DistinguishedName }
+        $targets += [PSCustomObject]@{ Name = $entry.Label; Dn = $entry.Group.DistinguishedName
+                                       Sd = (Get-ADHProp $entry.Group 'nTSecurityDescriptor') }
     }
     foreach ($u in (Get-ADHPrivilegedUser)) {
-        $targets += [PSCustomObject]@{ Name = $u.SamAccountName; Dn = $u.DistinguishedName }
+        $targets += [PSCustomObject]@{ Name = $u.SamAccountName; Dn = $u.DistinguishedName
+                                       Sd = (Get-ADHProp $u 'nTSecurityDescriptor') }
     }
-    foreach ($dc in (Get-ADDomainController @p -Filter *)) {
-        $targets += [PSCustomObject]@{ Name = $dc.Name; Dn = $dc.ComputerObjectDN }
+    foreach ($dc in (Get-ADHDomainControllerObject)) {
+        $targets += [PSCustomObject]@{ Name = $dc.Name; Dn = $dc.DistinguishedName
+                                       Sd = (Get-ADHProp $dc 'nTSecurityDescriptor') }
     }
 
     foreach ($t in $targets) {
-        $sd = Get-ADHSecurityDescriptor -DistinguishedName $t.Dn
+        $sd = $t.Sd
         if (-not $sd) { continue }
 
         $ownerSid = $null
@@ -1441,10 +1849,13 @@ function Test-ADHObjectOwnership {
         if ($trusted -contains $ownerSid) { continue }
         if ($ownerSid -match '-(512|516|518|519)$') { continue }
 
+        # Fall back to the raw SID when the account cannot be resolved - a
+        # deleted or foreign principal as owner is itself worth reporting.
         $ownerName = $ownerSid
         try {
             $ownerName = (New-Object System.Security.Principal.SecurityIdentifier($ownerSid)).Translate([System.Security.Principal.NTAccount]).Value
-        } catch { }
+        }
+        catch { Write-Verbose ('Owner SID {0} could not be translated.' -f $ownerSid) }
 
         $objects += New-ADHObject -Name $t.Name -DistinguishedName $t.Dn -Details ('owner: {0}' -f $ownerName)
     }
@@ -1460,15 +1871,14 @@ function Test-ADHObjectOwnership {
 }
 
 function Test-ADHDomainControllerAcl {
-    $p = Get-ADHParameter
     $objects = @()
 
-    foreach ($dc in (Get-ADDomainController @p -Filter *)) {
-        $sd = Get-ADHSecurityDescriptor -DistinguishedName $dc.ComputerObjectDN
+    foreach ($dc in (Get-ADHDomainControllerObject)) {
+        $sd = Get-ADHProp $dc 'nTSecurityDescriptor'
         if (-not $sd) { continue }
 
         foreach ($ace in (Get-ADHDangerousAce -SecurityDescriptor $sd)) {
-            $objects += New-ADHObject -Name $dc.Name -DistinguishedName $dc.ComputerObjectDN -Details (Format-ADHAce $ace)
+            $objects += New-ADHObject -Name $dc.Name -DistinguishedName $dc.DistinguishedName -Details (Format-ADHAce $ace)
         }
     }
 
@@ -1497,7 +1907,11 @@ function Test-ADHGpoAcl {
                 $tier0Links += ([regex]::Matches($link, '\{[0-9A-Fa-f-]{36}\}') | ForEach-Object { $_.Value.ToUpper() })
             }
         }
-        catch { }
+        catch {
+            # Without this the tier-0 marking is simply absent, so the finding
+            # stays valid but loses a priority hint. Worth seeing with -Verbose.
+            Write-Verbose ('gPLink on {0} could not be read: {1}' -f $dn, $_.Exception.Message)
+        }
     }
     $tier0Links = @($tier0Links | Select-Object -Unique)
 
@@ -1600,7 +2014,9 @@ function Test-ADHAdcsInventory {
         $objects += New-ADHObject -Name 'NTAuthCertificates' -DistinguishedName $paths.NtAuth `
             -Details ('{0} certificate authorities are trusted for domain authentication' -f $certs.Count)
     }
-    catch { }
+    catch {
+        Write-Verbose ('NTAuthCertificates could not be read: {0}' -f $_.Exception.Message)
+    }
 
     New-ADHFinding -Id 'ADCS-001' -Category 'Certificate services' -Severity 'Info' `
         -Title 'Certificate services inventory' `
@@ -1867,70 +2283,195 @@ function New-CatalogueEntry {
     param(
         [int] $Number, [string] $Id, [string] $Category, [string] $Name,
         [ValidateSet('Fast','Medium','Slow')] [string] $Cost,
+        [ValidateSet('Domain','Forest')] [string] $Scope,
         [scriptblock] $Action
     )
     [PSCustomObject]@{
         Number = $Number; Id = $Id; Category = $Category
-        Name = $Name; Cost = $Cost; Action = $Action
+        Name = $Name; Cost = $Cost; Scope = $Scope; Action = $Action
     }
 }
 
 $script:Catalogue = @(
-    New-CatalogueEntry  1 'KRB-001'  'Kerberos'             'Kerberoastable accounts (SPN on user objects)'      'Fast'   { Test-ADHKerberoastable }
-    New-CatalogueEntry  2 'KRB-002'  'Kerberos'             'Kerberos pre-authentication disabled'               'Fast'   { Test-ADHAsRepRoastable }
-    New-CatalogueEntry  3 'KRB-003'  'Kerberos'             'krbtgt password age'                                'Fast'   { Test-ADHKrbtgtAge }
+    New-CatalogueEntry  1 'KRB-001'   'Kerberos'             'Kerberoastable accounts (SPN on user objects)'      'Fast'   'Domain' { Test-ADHKerberoastable }
+    New-CatalogueEntry  2 'KRB-002'   'Kerberos'             'Kerberos pre-authentication disabled'               'Fast'   'Domain' { Test-ADHAsRepRoastable }
+    New-CatalogueEntry  3 'KRB-003'   'Kerberos'             'krbtgt password age'                                'Fast'   'Domain' { Test-ADHKrbtgtAge }
+    New-CatalogueEntry  4 'KRB-004'   'Kerberos'             'Weak encryption (DES/RC4) on SPN and admin accounts' 'Medium' 'Domain' { Test-ADHWeakKerberosEncryption }
 
-    New-CatalogueEntry  4 'DEL-001'  'Delegation'           'Unconstrained delegation outside DCs'               'Fast'   { Test-ADHUnconstrainedDelegation }
-    New-CatalogueEntry  5 'DEL-002'  'Delegation'           'Constrained delegation with protocol transition'    'Fast'   { Test-ADHConstrainedDelegationTransition }
-    New-CatalogueEntry  6 'DEL-003'  'Delegation'           'Resource-based constrained delegation configured'   'Fast'   { Test-ADHResourceBasedDelegation }
+    New-CatalogueEntry  5 'DEL-001'   'Delegation'           'Unconstrained delegation outside DCs'               'Fast'   'Domain' { Test-ADHUnconstrainedDelegation }
+    New-CatalogueEntry  6 'DEL-002'   'Delegation'           'Constrained delegation with protocol transition'    'Fast'   'Domain' { Test-ADHConstrainedDelegationTransition }
+    New-CatalogueEntry  7 'DEL-003'   'Delegation'           'Resource-based constrained delegation configured'   'Fast'   'Domain' { Test-ADHResourceBasedDelegation }
 
-    New-CatalogueEntry  7 'PRIV-001' 'Privileges'           'Tier-0 group membership'                            'Fast'   { Test-ADHPrivilegedGroupMembership }
-    New-CatalogueEntry  8 'PRIV-002' 'Privileges'           'Privileged accounts without delegation protection'  'Fast'   { Test-ADHUnprotectedPrivilegedAccounts }
-    New-CatalogueEntry  9 'PRIV-003' 'Privileges'           'Orphaned adminCount flags'                          'Fast'   { Test-ADHOrphanedAdminCount }
+    New-CatalogueEntry  8 'PRIV-001'  'Privileges'           'Tier-0 group membership'                            'Fast'   'Domain' { Test-ADHPrivilegedGroupMembership }
+    New-CatalogueEntry  9 'PRIV-002'  'Privileges'           'Privileged accounts without delegation protection'  'Fast'   'Domain' { Test-ADHUnprotectedPrivilegedAccounts }
+    New-CatalogueEntry 10 'PRIV-003'  'Privileges'           'Orphaned adminCount flags'                          'Fast'   'Domain' { Test-ADHOrphanedAdminCount }
 
-    New-CatalogueEntry 10 'PWD-001'  'Passwords'            'Non-expiring passwords on enabled accounts'         'Fast'   { Test-ADHPasswordNeverExpires }
-    New-CatalogueEntry 11 'PWD-002'  'Passwords'            'Accounts that may have a blank password'            'Fast'   { Test-ADHPasswordNotRequired }
-    New-CatalogueEntry 12 'PWD-003'  'Passwords'            'Passwords stored with reversible encryption'        'Fast'   { Test-ADHReversibleEncryption }
-    New-CatalogueEntry 13 'PWD-004'  'Passwords'            'Privileged passwords older than one year'           'Fast'   { Test-ADHStalePrivilegedPasswords }
-    New-CatalogueEntry 14 'PWD-005'  'Passwords'            'Default domain password policy'                     'Fast'   { Test-ADHDomainPasswordPolicy }
+    New-CatalogueEntry 11 'PWD-001'   'Passwords'            'Non-expiring passwords on enabled accounts'         'Fast'   'Domain' { Test-ADHPasswordNeverExpires }
+    New-CatalogueEntry 12 'PWD-002'   'Passwords'            'Accounts that may have a blank password'            'Fast'   'Domain' { Test-ADHPasswordNotRequired }
+    New-CatalogueEntry 13 'PWD-003'   'Passwords'            'Passwords stored with reversible encryption'        'Fast'   'Domain' { Test-ADHReversibleEncryption }
+    New-CatalogueEntry 14 'PWD-004'   'Passwords'            'Privileged passwords older than one year'           'Fast'   'Domain' { Test-ADHStalePrivilegedPasswords }
+    New-CatalogueEntry 15 'PWD-005'   'Passwords'            'Default domain password policy'                     'Fast'   'Domain' { Test-ADHDomainPasswordPolicy }
 
-    New-CatalogueEntry 15 'ACC-001'  'Account hygiene'      'Stale enabled user accounts'                        'Medium' { Test-ADHStaleUsers }
-    New-CatalogueEntry 16 'ACC-002'  'Account hygiene'      'Stale enabled computer accounts'                    'Medium' { Test-ADHStaleComputers }
-    New-CatalogueEntry 17 'ACC-003'  'Account hygiene'      'Objects carrying SID history'                       'Fast'   { Test-ADHSidHistory }
+    New-CatalogueEntry 16 'ACC-001'   'Account hygiene'      'Stale enabled user accounts'                        'Medium' 'Domain' { Test-ADHStaleUsers }
+    New-CatalogueEntry 17 'ACC-002'   'Account hygiene'      'Stale enabled computer accounts'                    'Medium' 'Domain' { Test-ADHStaleComputers }
+    New-CatalogueEntry 18 'ACC-003'   'Account hygiene'      'Objects carrying SID history'                       'Fast'   'Domain' { Test-ADHSidHistory }
+    New-CatalogueEntry 19 'ACC-004'   'Account hygiene'      'Possible credentials in description/info fields'    'Medium' 'Domain' { Test-ADHCredentialsInAttributes }
 
-    New-CatalogueEntry 18 'INF-001'  'Infrastructure'       'MachineAccountQuota'                                'Fast'   { Test-ADHMachineAccountQuota }
-    New-CatalogueEntry 19 'INF-002'  'Infrastructure'       'Domain controllers and functional levels'           'Fast'   { Test-ADHDomainControllers }
-    New-CatalogueEntry 20 'INF-003'  'Infrastructure'       'End-of-life operating systems'                      'Fast'   { Test-ADHLegacyOperatingSystems }
-    New-CatalogueEntry 21 'INF-004'  'Infrastructure'       'LAPS coverage'                                      'Medium' { Test-ADHLapsCoverage }
+    New-CatalogueEntry 20 'INF-001'   'Infrastructure'       'MachineAccountQuota'                                'Fast'   'Domain' { Test-ADHMachineAccountQuota }
+    New-CatalogueEntry 21 'INF-002'   'Infrastructure'       'Domain controllers and functional levels'           'Fast'   'Domain' { Test-ADHDomainControllers }
+    New-CatalogueEntry 22 'INF-003'   'Infrastructure'       'End-of-life operating systems'                      'Fast'   'Domain' { Test-ADHLegacyOperatingSystems }
+    New-CatalogueEntry 23 'INF-004'   'Infrastructure'       'LAPS coverage'                                      'Medium' 'Domain' { Test-ADHLapsCoverage }
 
-    New-CatalogueEntry 22 'ACL-001'  'Permissions'          'Replication rights on the domain root (DCSync)'     'Fast'   { Test-ADHDcSyncRights }
-    New-CatalogueEntry 23 'ACL-002'  'Permissions'          'Dangerous permissions on tier-0 groups'             'Fast'   { Test-ADHPrivilegedGroupAcl }
-    New-CatalogueEntry 24 'ACL-003'  'Permissions'          'Dangerous permissions on privileged accounts'       'Slow'   { Test-ADHPrivilegedUserAcl }
-    New-CatalogueEntry 25 'ACL-004'  'Permissions'          'Dangerous permissions on AdminSDHolder'             'Fast'   { Test-ADHAdminSdHolderAcl }
-    New-CatalogueEntry 26 'ACL-005'  'Permissions'          'Broad delegations on organizational units'          'Slow'   { Test-ADHOrganizationalUnitAcl }
-    New-CatalogueEntry 27 'ACL-006'  'Permissions'          'Privileged objects with non-privileged owners'      'Slow'   { Test-ADHObjectOwnership }
-    New-CatalogueEntry 28 'ACL-007'  'Permissions'          'Dangerous permissions on DC objects'                'Fast'   { Test-ADHDomainControllerAcl }
-    New-CatalogueEntry 29 'ACL-008'  'Permissions'          'Write access on group policy objects'               'Slow'   { Test-ADHGpoAcl }
-    New-CatalogueEntry 30 'ACL-009'  'Permissions'          'Delegated write access on group membership'         'Slow'   { Test-ADHGroupMembershipDelegation }
+    New-CatalogueEntry 24 'TRUST-001' 'Trusts'               'Trust relationship configuration (SID filtering)'   'Fast'   'Domain' { Test-ADHTrustConfiguration }
 
-    New-CatalogueEntry 31 'ADCS-001' 'Certificate services' 'Certificate services inventory'                     'Fast'   { Test-ADHAdcsInventory }
-    New-CatalogueEntry 32 'ADCS-002' 'Certificate services' 'Requester-supplied subject with auth EKU (ESC1)'    'Medium' { Test-ADHAdcsSuppliedSubject }
-    New-CatalogueEntry 33 'ADCS-003' 'Certificate services' 'Templates without purpose restriction (ESC2)'       'Medium' { Test-ADHAdcsAnyPurpose }
-    New-CatalogueEntry 34 'ADCS-004' 'Certificate services' 'Broad enrollment agent templates (ESC3)'            'Medium' { Test-ADHAdcsEnrollmentAgent }
-    New-CatalogueEntry 35 'ADCS-005' 'Certificate services' 'Write access on certificate templates (ESC4)'       'Medium' { Test-ADHAdcsTemplateAcl }
-    New-CatalogueEntry 36 'ADCS-006' 'Certificate services' 'Dangerous permissions on PKI objects (ESC5/7)'      'Fast'   { Test-ADHAdcsContainerAcl }
-    New-CatalogueEntry 37 'ADCS-007' 'Certificate services' 'CA accepts SAN from request (ESC6)'                 'Slow'   { Test-ADHAdcsEditFlags }
-    New-CatalogueEntry 38 'ADCS-008' 'Certificate services' 'Templates without SID security extension (ESC9)'    'Medium' { Test-ADHAdcsNoSecurityExtension }
-    New-CatalogueEntry 39 'ADCS-009' 'Certificate services' 'Published templates with broad enrolment'           'Medium' { Test-ADHAdcsBroadEnrollment }
+    New-CatalogueEntry 25 'GPO-001'   'Group policy'         'Stored credentials in SYSVOL (cpassword)'           'Slow'   'Domain' { Test-ADHSysvolCpassword }
+
+    New-CatalogueEntry 26 'ACL-001'   'Permissions'          'Replication rights on the domain root (DCSync)'     'Fast'   'Domain' { Test-ADHDcSyncRights }
+    New-CatalogueEntry 27 'ACL-002'   'Permissions'          'Dangerous permissions on tier-0 groups'             'Fast'   'Domain' { Test-ADHPrivilegedGroupAcl }
+    New-CatalogueEntry 28 'ACL-003'   'Permissions'          'Dangerous permissions on privileged accounts'       'Medium' 'Domain' { Test-ADHPrivilegedUserAcl }
+    New-CatalogueEntry 29 'ACL-004'   'Permissions'          'Dangerous permissions on AdminSDHolder'             'Fast'   'Domain' { Test-ADHAdminSdHolderAcl }
+    New-CatalogueEntry 30 'ACL-005'   'Permissions'          'Broad delegations on organizational units'          'Slow'   'Domain' { Test-ADHOrganizationalUnitAcl }
+    New-CatalogueEntry 31 'ACL-006'   'Permissions'          'Privileged objects with non-privileged owners'      'Medium' 'Domain' { Test-ADHObjectOwnership }
+    New-CatalogueEntry 32 'ACL-007'   'Permissions'          'Dangerous permissions on DC objects'                'Fast'   'Domain' { Test-ADHDomainControllerAcl }
+    New-CatalogueEntry 33 'ACL-008'   'Permissions'          'Write access on group policy objects'               'Slow'   'Domain' { Test-ADHGpoAcl }
+    New-CatalogueEntry 34 'ACL-009'   'Permissions'          'Delegated write access on group membership'         'Slow'   'Domain' { Test-ADHGroupMembershipDelegation }
+
+    New-CatalogueEntry 35 'ADCS-001'  'Certificate services' 'Certificate services inventory'                     'Fast'   'Forest' { Test-ADHAdcsInventory }
+    New-CatalogueEntry 36 'ADCS-002'  'Certificate services' 'Requester-supplied subject with auth EKU (ESC1)'    'Medium' 'Forest' { Test-ADHAdcsSuppliedSubject }
+    New-CatalogueEntry 37 'ADCS-003'  'Certificate services' 'Templates without purpose restriction (ESC2)'       'Medium' 'Forest' { Test-ADHAdcsAnyPurpose }
+    New-CatalogueEntry 38 'ADCS-004'  'Certificate services' 'Broad enrollment agent templates (ESC3)'            'Medium' 'Forest' { Test-ADHAdcsEnrollmentAgent }
+    New-CatalogueEntry 39 'ADCS-005'  'Certificate services' 'Write access on certificate templates (ESC4)'       'Medium' 'Forest' { Test-ADHAdcsTemplateAcl }
+    New-CatalogueEntry 40 'ADCS-006'  'Certificate services' 'Dangerous permissions on PKI objects (ESC5/7)'      'Fast'   'Forest' { Test-ADHAdcsContainerAcl }
+    New-CatalogueEntry 41 'ADCS-007'  'Certificate services' 'CA accepts SAN from request (ESC6)'                 'Slow'   'Forest' { Test-ADHAdcsEditFlags }
+    New-CatalogueEntry 42 'ADCS-008'  'Certificate services' 'Templates without SID security extension (ESC9)'    'Medium' 'Forest' { Test-ADHAdcsNoSecurityExtension }
+    New-CatalogueEntry 43 'ADCS-009'  'Certificate services' 'Published templates with broad enrolment'           'Medium' 'Forest' { Test-ADHAdcsBroadEnrollment }
 )
 
 #############################################################################
 # REGION: Selection
 #############################################################################
 
+# The checks that map to a direct, single-step path to domain compromise.
+# This is the list to run when someone asks "we have twenty minutes, what
+# matters?" - everything here is either already a compromise or one move away
+# from one.
+$script:EssentialId = @(
+    'KRB-001'   # kerberoastable privileged service accounts
+    'KRB-003'   # krbtgt key age
+    'DEL-001'   # unconstrained delegation
+    'DEL-002'   # protocol transition
+    'PRIV-001'  # who is actually tier 0
+    'PWD-002'   # accounts that may have no password
+    'PWD-003'   # reversible encryption
+    'TRUST-001' # SID filtering
+    'GPO-001'   # cpassword in SYSVOL
+    'ACL-001'   # DCSync
+    'ACL-004'   # AdminSDHolder
+    'ACL-007'   # DC objects
+    'ACL-008'   # GPOs linked to tier 0
+    'ADCS-002'  # ESC1
+)
+
+$script:Preset = @(
+    [PSCustomObject]@{
+        Key = 'full'; Label = 'Everything'
+        Hint = 'the complete catalogue'
+        Filter = { $script:Catalogue }
+    }
+    [PSCustomObject]@{
+        Key = 'quick'; Label = 'Quick pass'
+        Hint = 'fast checks only'
+        Filter = { @($script:Catalogue | Where-Object { $_.Cost -eq 'Fast' }) }
+    }
+    [PSCustomObject]@{
+        Key = 'essential'; Label = 'Tier-0 essentials'
+        Hint = 'paths to domain compromise'
+        Filter = { @($script:Catalogue | Where-Object { $script:EssentialId -contains $_.Id }) }
+    }
+)
+
+function Get-ADHCategorySummary {
+    <# Categories in catalogue order, with counts for the menu. #>
+    $seen = @()
+    foreach ($c in $script:Catalogue) {
+        if ($seen -contains $c.Category) { continue }
+        $seen += $c.Category
+
+        $inCat = @($script:Catalogue | Where-Object { $_.Category -eq $c.Category })
+        [PSCustomObject]@{
+            Name   = $c.Category
+            Checks = $inCat
+            Count  = $inCat.Count
+            Slow   = @($inCat | Where-Object { $_.Cost -eq 'Slow' }).Count
+            Forest = @($inCat | Where-Object { $_.Scope -eq 'Forest' }).Count -eq $inCat.Count
+        }
+    }
+}
+
+function Write-ADHMenuRow {
+    param([string] $Key, [string] $Label, [string] $Note, [string] $Trailing = '', [string] $KeyColor = 'White')
+    Write-Host ('   {0,-4}' -f $Key) -ForegroundColor $KeyColor -NoNewline
+    if ($Note) {
+        Write-Host ('{0,-50}' -f $Label) -NoNewline
+        if ($Trailing) {
+            Write-Host ('{0,-13}' -f $Note) -ForegroundColor DarkGray -NoNewline
+            Write-Host $Trailing -ForegroundColor DarkYellow
+        }
+        else {
+            Write-Host $Note -ForegroundColor DarkGray
+        }
+    }
+    else {
+        Write-Host $Label
+    }
+}
+
+function Show-ScanMenu {
+    <#
+        Top-level menu: three profiles, then one entry per category. Picking a
+        whole category is the common case, so it should not require knowing
+        which numbers the checks happen to occupy.
+    #>
+    $categories = @(Get-ADHCategorySummary)
+
+    Write-Host ''
+    Write-Host '  SCAN PROFILES' -ForegroundColor Cyan
+    Write-Host ''
+
+    $n = 1
+    foreach ($p in $script:Preset) {
+        $set = & $p.Filter
+        $slow = @($set | Where-Object { $_.Cost -eq 'Slow' }).Count
+        Write-ADHMenuRow -Key $n -Label ('{0} - {1}' -f $p.Label, $p.Hint) `
+            -Note ('{0} checks' -f @($set).Count) `
+            -Trailing $(if ($slow) { "$slow slow" } else { '' })
+        $n++
+    }
+
+    Write-Host ''
+    Write-Host '  CATEGORIES' -ForegroundColor Cyan
+    Write-Host ''
+
+    foreach ($cat in $categories) {
+        $label = $cat.Name
+        if ($cat.Forest) { $label += '  (forest-wide)' }
+        Write-ADHMenuRow -Key $n -Label $label `
+            -Note ('{0} check{1}' -f $cat.Count, $(if ($cat.Count -eq 1) { '' } else { 's' })) `
+            -Trailing $(if ($cat.Slow) { "$($cat.Slow) slow" } else { '' })
+        $n++
+    }
+
+    Write-Host ''
+    Write-ADHMenuRow -Key 'L' -Label ('List all {0} checks and pick individually' -f $script:Catalogue.Count) -Note '' -KeyColor 'DarkGray'
+    Write-ADHMenuRow -Key 'Q' -Label 'Cancel' -Note '' -KeyColor 'DarkGray'
+    Write-Host ''
+
+    return $categories
+}
+
 function Show-CheckCatalogue {
     Write-Host ''
-    Write-Host '  #   ID         Cost    Check' -ForegroundColor White
+    Write-Host '  #   ID         Cost    Scope   Check' -ForegroundColor White
     Write-Host ('  ' + ('-' * 74)) -ForegroundColor DarkGray
 
     $lastCategory = ''
@@ -1944,6 +2485,7 @@ function Show-CheckCatalogue {
         Write-Host ('  {0,-4}' -f $c.Number) -ForegroundColor White -NoNewline
         Write-Host ('{0,-11}' -f $c.Id) -ForegroundColor DarkGray -NoNewline
         Write-Host ('{0,-8}' -f $c.Cost) -ForegroundColor $costColor -NoNewline
+        Write-Host ('{0,-8}' -f $c.Scope) -ForegroundColor DarkGray -NoNewline
         Write-Host $c.Name
     }
     Write-Host ''
@@ -1966,9 +2508,13 @@ function Resolve-CheckSelection {
             $t = $token.Trim()
             if (-not $t) { continue }
 
-            # Keywords
-            if ($t -match '^(all|full|\*)$') { $selected += $script:Catalogue; continue }
-            if ($t -match '^fast$')          { $selected += @($script:Catalogue | Where-Object { $_.Cost -eq 'Fast' }); continue }
+            # Keywords - these mirror the profiles offered by the interactive menu
+            if ($t -match '^(all|full|\*)$')     { $selected += $script:Catalogue; continue }
+            if ($t -match '^(fast|quick)$')      { $selected += @($script:Catalogue | Where-Object { $_.Cost -eq 'Fast' }); continue }
+            if ($t -match '^(essential|tier0)$') { $selected += @($script:Catalogue | Where-Object { $script:EssentialId -contains $_.Id }); continue }
+            if ($t -match '^slow$')              { $selected += @($script:Catalogue | Where-Object { $_.Cost -eq 'Slow' }); continue }
+            if ($t -match '^domain$')            { $selected += @($script:Catalogue | Where-Object { $_.Scope -eq 'Domain' }); continue }
+            if ($t -match '^forest$')            { $selected += @($script:Catalogue | Where-Object { $_.Scope -eq 'Forest' }); continue }
 
             # Range, e.g. 7-14
             if ($t -match '^(\d+)\s*-\s*(\d+)$') {
@@ -2010,24 +2556,404 @@ function Resolve-CheckSelection {
 }
 
 function Read-CheckSelection {
-    <# Interactive menu. Returns catalogue entries, or an empty array on cancel. #>
-    Show-CheckCatalogue
+    <#
+        Interactive menu. Two levels: pick a profile or one or more categories,
+        or drop into the full list to pick individual checks. Returns catalogue
+        entries, or an empty array when the user cancels.
+    #>
+    while ($true) {
 
-    Write-Host '  Selection examples:' -ForegroundColor DarkGray
-    Write-Host '    all              every check          1-14             a range'         -ForegroundColor DarkGray
-    Write-Host '    fast             fast checks only     3,7,22           individual items' -ForegroundColor DarkGray
-    Write-Host '    ADCS             a whole group        Kerberos,ACL     mixed'            -ForegroundColor DarkGray
-    Write-Host ''
+        $categories = @(Show-ScanMenu)
+        $presetCount = @($script:Preset).Count
 
-    $answer = Read-Host '  Select checks (empty to cancel)'
-    if ([string]::IsNullOrWhiteSpace($answer)) { return @() }
+        $answer = Read-Host '  Select (e.g. 3, or 5,7,12)'
+        $answer = "$answer".Trim()
 
-    return Resolve-CheckSelection -Tokens @($answer)
+        if ([string]::IsNullOrWhiteSpace($answer) -or $answer -match '^(q|quit|exit|cancel)$') {
+            return @()
+        }
+
+        # --- Individual picker -------------------------------------------------
+        if ($answer -match '^(l|list)$') {
+            Show-CheckCatalogue
+            Write-Host '  Numbers, ranges and IDs all work:' -ForegroundColor DarkGray
+            Write-Host '    3,7,22           individual checks' -ForegroundColor DarkGray
+            Write-Host '    1-14             a range'           -ForegroundColor DarkGray
+            Write-Host '    ADCS, Kerberos   a whole group'     -ForegroundColor DarkGray
+            Write-Host ''
+
+            $detail = Read-Host '  Select checks (empty to go back)'
+            if ([string]::IsNullOrWhiteSpace($detail)) { continue }
+
+            $picked = Resolve-CheckSelection -Tokens @($detail)
+            if (-not @($picked).Count) {
+                Write-Host '  Nothing matched. Try again.' -ForegroundColor Yellow
+                continue
+            }
+            return $picked
+        }
+
+        # A range at this level is ambiguous: "1-3" could mean the first three
+        # menu rows or checks 1 to 3. Rather than silently picking one reading,
+        # send the user to the list where ranges have an unambiguous meaning.
+        if ($answer -match '^\s*\d+\s*-\s*\d+\s*$') {
+            Write-Host ''
+            Write-Host '  Ranges refer to individual check numbers, not menu rows.' -ForegroundColor Yellow
+            Write-Host '  Press L to open the full list, or pick menu rows as 1,2,3.' -ForegroundColor Yellow
+            Write-Host ''
+            continue
+        }
+
+        # --- Menu numbers ------------------------------------------------------
+        $selected = @()
+        $bad = @()
+
+        foreach ($token in ($answer -split '[,;\s]+')) {
+            if (-not $token) { continue }
+
+            if ($token -notmatch '^\d+$') { $bad += $token; continue }
+            $i = [int]$token
+
+            if ($i -ge 1 -and $i -le $presetCount) {
+                $selected += & $script:Preset[$i - 1].Filter
+            }
+            elseif ($i -gt $presetCount -and $i -le ($presetCount + $categories.Count)) {
+                $selected += $categories[$i - $presetCount - 1].Checks
+            }
+            else { $bad += $token }
+        }
+
+        # Anything that was not a menu number gets one more chance as a check ID,
+        # category name or range - typing "ADCS" here should just work.
+        if ($bad.Count -and -not $selected.Count) {
+            $selected = @(Resolve-CheckSelection -Tokens @($answer))
+        }
+        elseif ($bad.Count) {
+            Write-Host ('  Ignored: {0}' -f ($bad -join ', ')) -ForegroundColor Yellow
+        }
+
+        $selected = @($selected | Sort-Object Number -Unique)
+
+        if (-not $selected.Count) {
+            Write-Host '  Nothing matched. Try again.' -ForegroundColor Yellow
+            continue
+        }
+
+        # --- Confirm -----------------------------------------------------------
+        $slow = @($selected | Where-Object { $_.Cost -eq 'Slow' }).Count
+        Write-Host ''
+        Write-Host ('  {0} check{1} selected:' -f $selected.Count, $(if ($selected.Count -eq 1) { '' } else { 's' })) -ForegroundColor Cyan
+
+        foreach ($cat in ($selected | Select-Object -ExpandProperty Category -Unique)) {
+            $inCat = @($selected | Where-Object { $_.Category -eq $cat })
+            Write-Host ('    {0,-24} {1}' -f $cat, (($inCat.Id) -join ', ')) -ForegroundColor DarkGray
+        }
+
+        if ($slow) {
+            Write-Host ''
+            Write-Host ('  {0} of these read a security descriptor per object and will take a while.' -f $slow) -ForegroundColor DarkYellow
+        }
+
+        Write-Host ''
+        $confirm = Read-Host '  Start scan? [Y/n]'
+        if ("$confirm".Trim() -match '^(n|no)$') { continue }
+
+        return $selected
+    }
+}
+
+#############################################################################
+# REGION: Approved exceptions
+#############################################################################
+
+function Get-ADHExceptionPath {
+    <#
+        Explicit parameter wins; otherwise look for the default file next to
+        the script. Returns $null when there is nothing to load.
+    #>
+    if ($NoExceptions) { return $null }
+    if ($ExceptionFile) {
+        if (Test-Path -LiteralPath $ExceptionFile) { return $ExceptionFile }
+        throw ('Exception file not found: {0}' -f $ExceptionFile)
+    }
+
+    $root = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
+    $default = Join-Path $root 'ADSecurityScan.exceptions.json'
+    if (Test-Path -LiteralPath $default) { return $default }
+    return $null
+}
+
+function Get-ADHException {
+    <#
+        Loads and normalises the exception file. Every entry needs a checkId, an
+        object pattern, a reason and an expiry date - an exception without an
+        end date is not an exception, it is a permanent blind spot.
+    #>
+    param([string] $Path)
+
+    if (-not $Path) { return @() }
+
+    try {
+        $raw = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json
+    }
+    catch {
+        Write-Warning ('Exception file could not be parsed, continuing without exceptions: {0}' -f $_.Exception.Message)
+        return @()
+    }
+
+    $entries = @(Get-ADHProp $raw 'exceptions' @())
+    $result = @()
+    $today = (Get-Date).Date
+
+    foreach ($e in $entries) {
+        $checkId = Get-ADHProp $e 'checkId'
+        $object  = Get-ADHProp $e 'object'
+        $reason  = Get-ADHProp $e 'reason'
+        $expires = Get-ADHProp $e 'expires'
+
+        if (-not $checkId -or -not $object) {
+            Write-Warning 'Exception entry without checkId or object was skipped.'
+            continue
+        }
+        if (-not $reason) {
+            Write-Warning ('Exception for {0}/{1} has no reason and was skipped.' -f $checkId, $object)
+            continue
+        }
+
+        $expiryDate = $null
+        if ($expires) {
+            try { $expiryDate = ([datetime]$expires).Date }
+            catch {
+                Write-Warning ('Exception for {0}/{1} has an unreadable expiry date and was skipped.' -f $checkId, $object)
+                continue
+            }
+        }
+        else {
+            Write-Warning ('Exception for {0}/{1} has no expiry date and was skipped. Exceptions must expire.' -f $checkId, $object)
+            continue
+        }
+
+        $result += [PSCustomObject]@{
+            CheckId    = $checkId
+            Object     = $object
+            Reason     = $reason
+            ApprovedBy = Get-ADHProp $e 'approvedBy' 'not stated'
+            Expires    = $expiryDate
+            Expired    = ($expiryDate -lt $today)
+            DaysLeft   = [int]($expiryDate - $today).TotalDays
+        }
+    }
+
+    return @($result)
+}
+
+function Test-ADHExceptionMatch {
+    <# Does this exception cover this finding object? #>
+    param($Exception, $Finding, $Object)
+
+    if ($Exception.Expired) { return $false }
+    if ($Finding.Id -notlike $Exception.CheckId) { return $false }
+
+    return ($Object.Name -like $Exception.Object) -or
+           ($Object.DistinguishedName -like $Exception.Object)
+}
+
+function Invoke-ADHExceptionFilter {
+    <#
+        Removes covered objects from each finding and downgrades a finding to
+        Pass when nothing is left. Informational findings keep their severity -
+        an inventory with everything excepted is still an inventory.
+    #>
+    param(
+        [Parameter(Mandatory)] [System.Collections.Generic.List[object]] $Findings,
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $Exceptions
+    )
+
+    $active = @($Exceptions | Where-Object { -not $_.Expired })
+    if (-not $active.Count) { return 0 }
+
+    $suppressed = 0
+
+    for ($i = 0; $i -lt $Findings.Count; $i++) {
+        $f = $Findings[$i]
+        if (-not $f.Objects.Count) { continue }
+
+        $kept = @()
+        $removed = 0
+
+        foreach ($o in $f.Objects) {
+            $covered = $false
+            foreach ($x in $active) {
+                if (Test-ADHExceptionMatch -Exception $x -Finding $f -Object $o) { $covered = $true; break }
+            }
+            if ($covered) { $removed++ } else { $kept += $o }
+        }
+
+        if (-not $removed) { continue }
+        $suppressed += $removed
+
+        $newSeverity = $f.Severity
+        $note = ' [{0} object(s) covered by approved exceptions]' -f $removed
+
+        if (-not $kept.Count -and $f.Severity -in @('Critical','High','Medium','Low')) {
+            $newSeverity = 'Pass'
+            $note = ' [all {0} object(s) covered by approved exceptions]' -f $removed
+        }
+
+        $Findings[$i] = [PSCustomObject]@{
+            PSTypeName  = 'ADSecurityScan.Finding'
+            Id          = $f.Id
+            Category    = $f.Category
+            Title       = $f.Title
+            Severity    = $newSeverity
+            Count       = $kept.Count
+            Summary     = $f.Summary + $note
+            Remediation = $f.Remediation
+            Reference   = (Get-ADHProp $f 'Reference')
+            Objects     = @($kept)
+        }
+    }
+
+    return $suppressed
+}
+
+function New-ADHExceptionFinding {
+    <#
+        Makes the exception file itself auditable: what is currently suppressed,
+        what has expired, and what is about to.
+    #>
+    param(
+        [Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $Exceptions,
+        [string] $Path,
+        [int] $Suppressed
+    )
+
+    $expired = @($Exceptions | Where-Object { $_.Expired })
+    $soon    = @($Exceptions | Where-Object { -not $_.Expired -and $_.DaysLeft -le 30 })
+    $active  = @($Exceptions | Where-Object { -not $_.Expired })
+
+    $objects = foreach ($x in ($Exceptions | Sort-Object Expires)) {
+        $state = if ($x.Expired)          { 'EXPIRED' }
+                 elseif ($x.DaysLeft -le 30) { 'expires soon' }
+                 else                      { 'active' }
+
+        New-ADHObject -Name ('{0} -> {1}' -f $x.CheckId, $x.Object) -DistinguishedName $Path -Details (
+            '{0} | expires {1} ({2} days) | approved by: {3} | reason: {4}' -f `
+                $state, $x.Expires.ToString('yyyy-MM-dd'), $x.DaysLeft, $x.ApprovedBy, $x.Reason)
+    }
+
+    $sev = if ($expired.Count -gt 0) { 'Medium' } elseif ($soon.Count -gt 0) { 'Low' } else { 'Info' }
+
+    New-ADHFinding -Id 'EXC-001' -Category 'Exceptions' -Severity $sev `
+        -Title 'Approved exceptions' `
+        -Summary ('{0} active exception(s) suppressed {1} object(s) in this run. {2} have expired and are no longer suppressing anything, {3} expire within 30 days.' -f `
+            $active.Count, $Suppressed, $expired.Count, $soon.Count) `
+        -Remediation 'Review expired entries: either the finding was remediated and the entry can go, or the risk is still accepted and needs re-approving with a new date. An exception that silently renews itself is how a report stops being read.' `
+        -Objects @($objects)
 }
 
 #############################################################################
 # REGION: Console output
 #############################################################################
+
+function Get-ADHConsoleWidth {
+    <# Capped, because full-width lines on an ultrawide terminal are hard to read. #>
+    try {
+        $w = $Host.UI.RawUI.WindowSize.Width
+        if ($w -gt 40) { return [Math]::Min($w - 2, 104) }
+    }
+    catch {
+        # No raw UI (redirected output, remoting, scheduled task). Purely
+        # cosmetic, so fall through to the default width without a word.
+    }
+    return 100
+}
+
+function Write-ADHRule {
+    param([string] $Char = '-', [string] $Color = 'DarkGray', [int] $Indent = 2)
+    Write-Host ((' ' * $Indent) + ($Char * ((Get-ADHConsoleWidth) - $Indent))) -ForegroundColor $Color
+}
+
+function Write-ADHSectionHeading {
+    param([string] $Text, [string] $Color = 'Cyan')
+    Write-Host ''
+    Write-Host ('  {0}' -f $Text.ToUpper()) -ForegroundColor $Color
+    Write-Host ''
+}
+
+function Write-ADHField {
+    <# Aligned "label   value" pair used in the banner and the output block. #>
+    param([string] $Label, [string] $Value, [string] $Color = 'White')
+    Write-Host ('   {0,-14}' -f $Label) -ForegroundColor DarkGray -NoNewline
+    Write-Host $Value -ForegroundColor $Color
+}
+
+function Write-ADHBanner {
+    param([Parameter(Mandatory)] [hashtable] $Context, [Parameter(Mandatory)] [object[]] $Selected)
+
+    $width = Get-ADHConsoleWidth
+    $left  = ' Active Directory Security Assessment'
+    $right = 'read-only '
+    $pad   = [Math]::Max(1, $width - 2 - $left.Length - $right.Length)
+
+    Write-Host ''
+    Write-ADHRule '=' 'DarkCyan'
+    Write-Host ('  {0}{1}' -f $left, (' ' * $pad)) -ForegroundColor Cyan -NoNewline
+    Write-Host $right -ForegroundColor DarkGray
+    Write-ADHRule '=' 'DarkCyan'
+    Write-Host ''
+
+    Write-ADHField 'Domain'      $Context.Domain
+    Write-ADHField 'Controller'  $(if ($Context.Server) { $Context.Server } else { 'auto-discovered' })
+    Write-ADHField 'Running as'  $Context.RunAs
+    Write-ADHField 'Stale after' ('{0} days' -f $Context.StaleDays)
+
+    $slow = @($Selected | Where-Object { $_.Cost -eq 'Slow' }).Count
+    Write-ADHField 'Checks' ('{0} of {1}{2}' -f `
+        @($Selected).Count, $Context.TotalChecks,
+        $(if ($slow) { "   ($slow slow - these read a security descriptor per object)" } else { '' }))
+    Write-Host ''
+}
+
+function Write-ADHCheckResult {
+    <#
+        One line per check, printed as it completes: position, ID, name padded
+        out with dots, then the outcome. Far more useful mid-scan than a
+        timestamp, because the interesting checks announce themselves.
+    #>
+    param(
+        [int] $Index, [int] $Total,
+        [Parameter(Mandatory)] $Check,
+        $Finding,
+        [double] $Seconds
+    )
+
+    $width  = Get-ADHConsoleWidth
+    $digits = "$Total".Length
+    $prefix = '   [{0}/{1}]  ' -f "$Index".PadLeft($digits), $Total
+    $id     = '{0,-10}' -f $Check.Id
+
+    $severity = if ($Finding) { $Finding.Severity } else { 'Failed' }
+    $count    = if ($Finding -and $Finding.Count -gt 0) { "$($Finding.Count)" } else { '-' }
+
+    # Seven columns are reserved for the timing in the width calculation even
+    # when nothing is printed there, so severity and count stay aligned across
+    # rows. Nothing follows it, so an empty timing prints nothing rather than
+    # trailing spaces.
+    $timing = if ($Seconds -ge 3) { '{0,6:N0}s' -f $Seconds } else { '' }
+
+    $nameRoom = [Math]::Max(10, $width - $prefix.Length - $id.Length - 9 - 5 - 7 - 2)
+    $name     = Format-ADHTruncate $Check.Name $nameRoom
+    $dots     = '.' * [Math]::Max(1, $nameRoom - $name.Length)
+
+    Write-Host $prefix -ForegroundColor DarkGray -NoNewline
+    Write-Host $id -ForegroundColor Gray -NoNewline
+    Write-Host $name -NoNewline
+    Write-Host (' ' + $dots + ' ') -ForegroundColor DarkGray -NoNewline
+    Write-Host ('{0,-9}' -f $severity.ToUpper()) -ForegroundColor (Get-ADHSeverityColor $severity) -NoNewline
+    Write-Host ('{0,4}' -f $count) -ForegroundColor $(if ($count -eq '-') { 'DarkGray' } else { 'White' }) -NoNewline
+    Write-Host $timing -ForegroundColor DarkGray
+}
 
 function Register-ADHFormatData {
     <#
@@ -2086,6 +3012,10 @@ function Register-ADHFormatData {
               <ListItem><PropertyName>Summary</PropertyName></ListItem>
               <ListItem><PropertyName>Remediation</PropertyName></ListItem>
               <ListItem>
+                <Label>Reference</Label>
+                <ScriptBlock>if ($_.Reference) { "$($_.Reference.Title)`n    $($_.Reference.Url)" } else { '(none)' }</ScriptBlock>
+              </ListItem>
+              <ListItem>
                 <Label>Objects</Label>
                 <ScriptBlock>if (-not $_.Objects.Count) { '(none)' } else { "`n" + (($_.Objects | ForEach-Object { "  $($_.Name)`n    $($_.Details)`n    $($_.DistinguishedName)" }) -join "`n`n") }</ScriptBlock>
               </ListItem>
@@ -2142,15 +3072,6 @@ function Get-ADHSeverityColor {
     }
 }
 
-function Get-ADHConsoleWidth {
-    try {
-        $w = $Host.UI.RawUI.WindowSize.Width
-        if ($w -gt 40) { return $w - 2 }
-    }
-    catch { }
-    return 118
-}
-
 function Format-ADHTruncate {
     param([string] $Text, [int] $Max)
     if ([string]::IsNullOrEmpty($Text)) { return '' }
@@ -2173,47 +3094,60 @@ function Write-ADHConsoleReport {
     $width = Get-ADHConsoleWidth
     $order = @('Critical','High','Medium','Low','Info','Pass')
 
+    $actionable = @($Findings | Where-Object { $_.Severity -in @('Critical','High','Medium','Low') })
+    Write-ADHSectionHeading 'Findings'
+
+    if (-not $actionable.Count) {
+        Write-Host '   Nothing actionable found in the selected checks.' -ForegroundColor Green
+        Write-Host ''
+        return
+    }
+
+    $first = $true
     foreach ($sev in $order) {
         $group = @($Findings | Where-Object { $_.Severity -eq $sev } | Sort-Object Id)
         if (-not $group.Count) { continue }
 
         $color = Get-ADHSeverityColor $sev
+        $label = '{0} ({1})' -f $sev.ToUpper(), $group.Count
 
+        if (-not $first) { Write-Host '' }
+        $first = $false
+        Write-Host ('  {0} ' -f $label) -ForegroundColor $color -NoNewline
+        Write-Host ('-' * [Math]::Max(4, $width - $label.Length - 4)) -ForegroundColor DarkGray
         Write-Host ''
-        Write-Host ('  {0}  ' -f $sev.ToUpper()) -ForegroundColor $color -NoNewline
-        Write-Host ('-' * [Math]::Max(4, $width - $sev.Length - 6)) -ForegroundColor DarkGray
 
         foreach ($f in $group) {
-            # Headline: ID, title, object count
-            Write-Host ('  {0,-10}' -f $f.Id) -ForegroundColor $color -NoNewline
-            Write-Host (Format-ADHTruncate $f.Title ($width - 26)) -NoNewline
-            if ($f.Count -gt 0) {
-                Write-Host ('  ({0})' -f $f.Count) -ForegroundColor DarkGray
-            }
-            else {
-                Write-Host ''
-            }
+            $countText = if ($f.Count -gt 0) { '{0,5}' -f $f.Count } else { '    -' }
+            $nameRoom  = [Math]::Max(20, $width - 20)
+            $title     = Format-ADHTruncate $f.Title $nameRoom
+
+            Write-Host ('   {0,-10}' -f $f.Id) -ForegroundColor $color -NoNewline
+            # The parentheses matter: without them -f binds to the trailing
+            # literal instead of the assembled format string.
+            Write-Host (('{0,-' + $nameRoom + '}') -f $title) -NoNewline
+            Write-Host $countText -ForegroundColor $(if ($f.Count -gt 0) { 'White' } else { 'DarkGray' })
 
             if (-not $ShowObjects -or $f.Count -eq 0) { continue }
 
             # Detail block: one indented paragraph per affected object.
             foreach ($o in ($f.Objects | Select-Object -First $MaxObjects)) {
                 Write-Host ''
-                Write-Host ('      {0}' -f $o.Name) -ForegroundColor White
+                Write-Host ('        {0}' -f $o.Name) -ForegroundColor White
 
                 foreach ($part in ($o.Details -split '\s\|\s')) {
                     if ([string]::IsNullOrWhiteSpace($part)) { continue }
-                    Write-Host ('        {0}' -f (Format-ADHTruncate $part.Trim() ($width - 10)))
+                    Write-Host ('          {0}' -f (Format-ADHTruncate $part.Trim() ($width - 12)))
                 }
 
                 if ($o.DistinguishedName) {
-                    Write-Host ('        {0}' -f (Format-ADHTruncate $o.DistinguishedName ($width - 10))) -ForegroundColor DarkGray
+                    Write-Host ('          {0}' -f (Format-ADHTruncate $o.DistinguishedName ($width - 12))) -ForegroundColor DarkGray
                 }
             }
 
             if ($f.Count -gt $MaxObjects) {
                 Write-Host ''
-                Write-Host ('      ... {0} more, see the report or use -IncludeJson' -f ($f.Count - $MaxObjects)) -ForegroundColor DarkGray
+                Write-Host ('        ... and {0} more - see the HTML report, or raise -MaxConsoleObjects' -f ($f.Count - $MaxObjects)) -ForegroundColor DarkGray
             }
             Write-Host ''
         }
@@ -2224,23 +3158,24 @@ function Write-ADHConsoleReport {
 function Write-ADHConsoleSummary {
     param([Parameter(Mandatory)] [object[]] $Findings, $Elapsed)
 
-    $width = Get-ADHConsoleWidth
-    Write-Host ''
-    Write-Host ('  ' + ('-' * ($width - 2))) -ForegroundColor DarkGray
+    Write-ADHSectionHeading 'Result'
 
-    $parts = @()
+    $total = @($Findings).Count
+
     foreach ($s in @('Critical','High','Medium','Low','Info','Pass')) {
         $n = @($Findings | Where-Object { $_.Severity -eq $s }).Count
-        if ($n -gt 0) { $parts += @{ Label = $s; Count = $n } }
+        if ($n -eq 0) { continue }
+
+        # A crude proportional bar: enough to see the shape at a glance without
+        # pretending to be a chart.
+        $blocks = [Math]::Max(1, [int][Math]::Round(($n / [Math]::Max(1, $total)) * 40))
+        Write-Host ('   {0,-10}' -f $s) -ForegroundColor (Get-ADHSeverityColor $s) -NoNewline
+        Write-Host ('{0,4}  ' -f $n) -NoNewline
+        Write-Host ('#' * $blocks) -ForegroundColor (Get-ADHSeverityColor $s)
     }
 
-    Write-Host '  ' -NoNewline
-    foreach ($p in $parts) {
-        Write-Host ('{0} ' -f $p.Count) -ForegroundColor (Get-ADHSeverityColor $p.Label) -NoNewline
-        Write-Host ('{0}   ' -f $p.Label.ToLower()) -ForegroundColor DarkGray -NoNewline
-    }
-    Write-Host ('| {0:mm\:ss} elapsed' -f $Elapsed) -ForegroundColor DarkGray
     Write-Host ''
+    Write-Host ('   {0} check{1} in {2:mm\:ss}' -f $total, $(if ($total -eq 1) { '' } else { 's' }), $Elapsed) -ForegroundColor DarkGray
 }
 
 #############################################################################
@@ -2290,10 +3225,27 @@ h1{font-size:30px;line-height:1.15;font-weight:650;margin:0 0 14px;letter-spacin
 .cell .cid{font-family:var(--mono);font-size:12px;font-weight:600;color:var(--ink);display:block}
 .cell .cnt{font-family:var(--mono);font-size:11px;color:var(--ink-faint)}
 
-.count-row{display:flex;flex-wrap:wrap;gap:1px;background:var(--rule);border:1px solid var(--rule);margin-bottom:44px}
-.tally{flex:1 1 120px;background:var(--paper);padding:14px 16px}
+.count-row{display:flex;flex-wrap:wrap;gap:1px;background:var(--rule);border:1px solid var(--rule);margin-bottom:16px}
+.tally{flex:1 1 120px;background:var(--paper);padding:14px 16px;border:0;text-align:left;
+       font-family:inherit;cursor:pointer;display:block;transition:background .12s;
+       box-shadow:inset 0 0 0 0 transparent}
+.tally:hover:not(:disabled){background:#F7F9FB}
+.tally:disabled{cursor:default;opacity:.45}
+.tally:focus-visible{outline:2px solid var(--sev-low);outline-offset:-2px}
+/* Selected state stays light so the severity-coloured number keeps its contrast. */
+.tally[aria-pressed="true"]{background:#E4EAF0;box-shadow:inset 0 -3px 0 0 currentColor}
 .tally .n{font-family:var(--mono);font-size:26px;font-weight:600;line-height:1;display:block}
 .tally .l{font-family:var(--mono);font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--ink-soft)}
+.filter-note{font-family:var(--mono);font-size:12px;color:var(--ink-soft);margin:0 0 28px;display:none}
+.filter-note button{font-family:var(--mono);font-size:12px;background:none;border:0;padding:0 0 0 8px;
+                    color:var(--sev-low);cursor:pointer;text-decoration:underline}
+#findings{margin-top:28px}
+.is-hidden{display:none !important}
+
+.f-ref{margin:10px 0 0;font-family:var(--mono);font-size:12px}
+.f-ref a{color:var(--sev-low);text-decoration:none;border-bottom:1px solid var(--rule)}
+.f-ref a:hover{border-bottom-color:var(--sev-low)}
+.f-ref span{color:var(--ink-faint);letter-spacing:.08em;text-transform:uppercase;margin-right:8px}
 
 section.cat{margin-bottom:44px}
 h2{font-size:13px;font-family:var(--mono);letter-spacing:.16em;text-transform:uppercase;
@@ -2332,6 +3284,9 @@ footer{margin-top:64px;padding-top:16px;border-top:1px solid var(--rule);
   details{display:block}
   details>summary{display:none}
   article.f{break-inside:avoid;background:transparent;border-left-width:3px}
+  /* A filtered view must not silently print an incomplete report. */
+  .is-hidden{display:block !important}
+  .count-row,.filter-note{display:none}
 }
 @media (max-width:640px){
   .wrap{padding:28px 16px 64px}
@@ -2359,7 +3314,13 @@ footer{margin-top:64px;padding-top:16px;border-top:1px solid var(--rule);
     $tallies = foreach ($s in @('Critical','High','Medium','Low','Info','Pass')) {
         $n = @($Findings | Where-Object { $_.Severity -eq $s }).Count
         $c = $sevClass[$s]
-        "<div class=""tally""><span class=""n"" style=""color:var(--sev-$c)"">$n</span><span class=""l"">$s</span></div>"
+        $disabled = if ($n -eq 0) { ' disabled' } else { '' }
+        @"
+<button type="button" class="tally" data-sev="$c" aria-pressed="false"$disabled
+        style="color:var(--sev-$c)" title="Show only $s findings">
+  <span class="n" style="color:var(--sev-$c)">$n</span><span class="l">$s</span>
+</button>
+"@
     }
 
     $sections = foreach ($cat in ($Findings | Select-Object -ExpandProperty Category -Unique | Sort-Object)) {
@@ -2367,6 +3328,14 @@ footer{margin-top:64px;padding-top:16px;border-top:1px solid var(--rule);
                                  Sort-Object { $script:SeverityRank[$_.Severity] }, Id)) {
             $c = $sevClass[$f.Severity]
             $passClass = if ($f.Severity -eq 'Pass') { ' pass' } else { '' }
+
+            $ref = Get-ADHProp $f 'Reference'
+            $refHtml = ''
+            if ($ref) {
+                $refHtml = @"
+<p class="f-ref"><span>Reference</span><a href="$(Protect-Html $ref.Url)" target="_blank" rel="noopener">$(Protect-Html $ref.Title)</a></p>
+"@
+            }
 
             $detail = ''
             if ($f.Objects.Count -gt 0) {
@@ -2388,7 +3357,7 @@ footer{margin-top:64px;padding-top:16px;border-top:1px solid var(--rule);
             }
 
             @"
-<article class="f$passClass" id="$(Protect-Html $f.Id)" style="border-left-color:var(--sev-$c)">
+<article class="f$passClass" id="$(Protect-Html $f.Id)" data-sev="$c" style="border-left-color:var(--sev-$c)">
   <div class="f-top">
     <span class="f-id">$(Protect-Html $f.Id)</span>
     <span class="f-sev" style="color:var(--sev-$c)">$(Protect-Html $f.Severity)</span>
@@ -2396,6 +3365,7 @@ footer{margin-top:64px;padding-top:16px;border-top:1px solid var(--rule);
   </div>
   <p class="f-sum">$(Protect-Html $f.Summary)</p>
   <p class="f-rem"><b>Remediation</b>$(Protect-Html $f.Remediation)</p>
+  $refHtml
   $detail
 </article>
 "@
@@ -2434,7 +3404,11 @@ footer{margin-top:64px;padding-top:16px;border-top:1px solid var(--rule);
 
 <div class="count-row">$($tallies -join "`n")</div>
 
+<p class="filter-note" id="filterNote"></p>
+
+<div id="findings">
 $($sections -join "`n")
+</div>
 
 <footer>
   Generated by Invoke-ADSecurityScan.ps1 - read-only queries, no directory modifications.<br>
@@ -2443,6 +3417,65 @@ $($sections -join "`n")
 </footer>
 
 </div>
+
+<script>
+(function () {
+  // Clicking a severity tally filters the report down to that severity and
+  // jumps to the findings. Clicking it again restores the full view. Findings
+  // are grouped by category, so a severity is scattered across sections -
+  // filtering is what actually produces "the High section".
+  var tallies = document.querySelectorAll('.tally[data-sev]');
+  var articles = document.querySelectorAll('article.f[data-sev]');
+  var sections = document.querySelectorAll('section.cat');
+  var note = document.getElementById('filterNote');
+  var active = null;
+
+  function apply(sev) {
+    active = sev;
+
+    articles.forEach(function (a) {
+      a.classList.toggle('is-hidden', sev !== null && a.dataset.sev !== sev);
+    });
+
+    // Hide category sections that no longer contain anything visible.
+    sections.forEach(function (s) {
+      var visible = s.querySelectorAll('article.f:not(.is-hidden)').length;
+      s.classList.toggle('is-hidden', visible === 0);
+    });
+
+    tallies.forEach(function (t) {
+      t.setAttribute('aria-pressed', String(t.dataset.sev === sev));
+    });
+
+    if (sev === null) {
+      note.style.display = 'none';
+      note.textContent = '';
+    } else {
+      var shown = document.querySelectorAll('article.f:not(.is-hidden)').length;
+      note.style.display = 'block';
+      note.textContent = 'Showing ' + shown + ' ' + sev + ' finding(s) only.';
+      var reset = document.createElement('button');
+      reset.type = 'button';
+      reset.textContent = 'show all';
+      reset.addEventListener('click', function () { apply(null); });
+      note.appendChild(reset);
+    }
+  }
+
+  tallies.forEach(function (t) {
+    t.addEventListener('click', function () {
+      var sev = t.dataset.sev;
+      if (active === sev) { apply(null); return; }
+      apply(sev);
+      document.getElementById('findings').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  });
+
+  // Printing must never produce a silently incomplete report.
+  window.addEventListener('beforeprint', function () { if (active !== null) { apply(null); } });
+})();
+</script>
+
 </body>
 </html>
 "@
@@ -2451,6 +3484,11 @@ $($sections -join "`n")
 #############################################################################
 # REGION: Main
 #############################################################################
+
+# Everything above is definitions. Stop here when the caller only wants the
+# functions and the catalogue in scope - the Pester tests dot-source the script
+# this way, which is why this sits before Import-Module ActiveDirectory.
+if ($InitializeOnly) { return }
 
 if ($ListChecks) {
     Show-CheckCatalogue
@@ -2483,20 +3521,24 @@ else {
     $toRun = $script:Catalogue
 }
 
+# Certificate services live in the configuration partition and are therefore
+# identical for every domain in the forest. When walking a multi-domain forest,
+# run them once and skip them afterwards.
+if ($SkipForestWide) {
+    $before = @($toRun).Count
+    $toRun = @($toRun | Where-Object { $_.Scope -ne 'Forest' })
+    $skipped = $before - @($toRun).Count
+    if ($skipped -gt 0) {
+        Write-Host ('  Skipping {0} forest-wide check(s) as requested.' -f $skipped) -ForegroundColor DarkGray
+    }
+}
+
 if (-not @($toRun).Count) {
     Write-Host ''
     Write-Host '  Nothing selected. Use -ListChecks to see the catalogue.' -ForegroundColor Yellow
     Write-Host ''
     return
 }
-
-Write-Host ''
-Write-Host 'Active Directory security assessment (read-only)' -ForegroundColor Cyan
-Write-Host ('{0} of {1} checks selected' -f @($toRun).Count, $script:Catalogue.Count) -ForegroundColor DarkGray
-if (@($toRun | Where-Object { $_.Cost -eq 'Slow' }).Count -gt 0) {
-    Write-Host 'Selection includes slow checks - these read a security descriptor per object.' -ForegroundColor DarkYellow
-}
-Write-Host ''
 
 $domainInfo = Get-ADHDomain
 $p = Get-ADHParameter
@@ -2510,25 +3552,59 @@ $context = @{
     TotalChecks = $script:Catalogue.Count
 }
 
+if (-not $Quiet) { Write-ADHBanner -Context $context -Selected $toRun }
+
 $findings = New-Object System.Collections.Generic.List[object]
 $started = Get-Date
+$index = 0
+$total = @($toRun).Count
+
+if (-not $Quiet) { Write-ADHSectionHeading 'Running' }
 
 foreach ($check in $toRun) {
-    Write-Step ('{0,-9} {1}' -f $check.Id, $check.Name)
+    $index++
+    $checkStart = Get-Date
+    $result = $null
+
     try {
         $result = & $check.Action
         if ($result) { $findings.Add($result) }
     }
     catch {
-        Write-Warning ('{0} failed: {1}' -f $check.Id, $_.Exception.Message)
-        $findings.Add((New-ADHFinding -Id $check.Id -Category 'Errors' -Severity 'Info' `
+        $result = New-ADHFinding -Id $check.Id -Category 'Errors' -Severity 'Info' `
             -Title ('Check {0} could not be completed' -f $check.Id) `
             -Summary $_.Exception.Message `
-            -Remediation 'Verify permissions and domain controller reachability, then re-run with -Verbose.'))
+            -Remediation 'Verify permissions and domain controller reachability, then re-run with -Verbose.'
+        $findings.Add($result)
+        if (-not $Quiet) {
+            Write-ADHCheckResult -Index $index -Total $total -Check $check -Finding $null `
+                -Seconds ((Get-Date) - $checkStart).TotalSeconds
+            Write-Host ('              {0}' -f $_.Exception.Message) -ForegroundColor DarkYellow
+        }
+        continue
+    }
+
+    if (-not $Quiet) {
+        Write-ADHCheckResult -Index $index -Total $total -Check $check -Finding $result `
+            -Seconds ((Get-Date) - $checkStart).TotalSeconds
     }
 }
 
 $elapsed = (Get-Date) - $started
+
+# --- Apply approved exceptions ---
+$exceptionPath = Get-ADHExceptionPath
+if ($exceptionPath) {
+    $exceptions = Get-ADHException -Path $exceptionPath
+    $suppressed = Invoke-ADHExceptionFilter -Findings $findings -Exceptions $exceptions
+    $findings.Add((New-ADHExceptionFinding -Exceptions $exceptions -Path $exceptionPath -Suppressed $suppressed))
+
+    if (-not $Quiet) {
+        Write-Host ''
+        Write-Host ('   {0} exception(s) loaded from {1}, {2} object(s) suppressed' -f `
+            @($exceptions).Count, (Split-Path -Leaf $exceptionPath), $suppressed) -ForegroundColor DarkGray
+    }
+}
 
 if (-not $Quiet) {
     Write-ADHConsoleReport -Findings $findings `
@@ -2545,14 +3621,16 @@ if (-not $NoReport) {
     $stamp = Get-Date -Format 'yyyyMMdd-HHmm'
     $base  = Join-Path $OutputPath ('ADSecurityScan_{0}_{1}' -f $context.Domain, $stamp)
 
+    if (-not $Quiet) { Write-ADHSectionHeading 'Output' }
+
     $htmlPath = "$base.html"
     ConvertTo-ADHHtml -Findings $findings -Context $context | Out-File -LiteralPath $htmlPath -Encoding UTF8
-    Write-Host ('  HTML report : {0}' -f $htmlPath) -ForegroundColor Green
+    if (-not $Quiet) { Write-ADHField 'HTML' $htmlPath 'Green' }
 
     if ($IncludeJson) {
         $jsonPath = "$base.json"
         $findings | ConvertTo-Json -Depth 6 | Out-File -LiteralPath $jsonPath -Encoding UTF8
-        Write-Host ('  JSON export : {0}' -f $jsonPath) -ForegroundColor Green
+        if (-not $Quiet) { Write-ADHField 'JSON' $jsonPath 'Green' }
     }
 
     if ($IncludeCsv) {
@@ -2571,9 +3649,14 @@ if (-not $NoReport) {
             }
         }
         $flat | Export-Csv -LiteralPath $csvPath -NoTypeInformation -Encoding UTF8
-        Write-Host ('  CSV export  : {0}' -f $csvPath) -ForegroundColor Green
+        if (-not $Quiet) { Write-ADHField 'CSV' $csvPath 'Green' }
     }
-    Write-Host ''
+
+    if (-not $Quiet) {
+        Write-Host ''
+        Write-Host '   Reports map out the domain in detail - store them like credentials.' -ForegroundColor DarkGray
+        Write-Host ''
+    }
 }
 
 # Findings only reach the pipeline on request - otherwise the console report
@@ -2582,6 +3665,6 @@ if ($PassThru) {
     $findings
 }
 elseif (-not $Quiet -and -not $Compact) {
-    Write-Host '  Tip: -Compact for one line per finding, -PassThru to get the objects.' -ForegroundColor DarkGray
+    Write-Host '   Tip: -Compact for one line per finding, -PassThru to get the objects.' -ForegroundColor DarkGray
     Write-Host ''
 }
