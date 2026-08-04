@@ -2,7 +2,7 @@
 
 # AD-Security-Scan
 
-### 39 read-only checks against your Active Directory — run from a plain user account, because that is all an attacker needs.
+### 43 read-only checks against your Active Directory — run from a plain user account, because that is all an attacker needs.
 
 A single PowerShell script that queries a domain over LDAP, finds the misconfigurations that actually lead to domain compromise, and turns them into a prioritised console output and an HTML report you can hand to management.
 
@@ -10,13 +10,13 @@ A single PowerShell script that queries a domain over LDAP, finds the misconfigu
 &nbsp;
 ![Platform: Windows](https://img.shields.io/badge/platform-Windows-0078D6)
 &nbsp;
-![Checks: 39](https://img.shields.io/badge/checks-39-0A7B4E)
+![Checks: 43](https://img.shields.io/badge/checks-43-0A7B4E)
 &nbsp;
 ![Access: read-only](https://img.shields.io/badge/access-read--only-6E44FF)
 &nbsp;
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-[Checks](#what-it-checks) · [Quick start](#quick-start) · [Output](#output) · [Triage](#where-to-start) · [Troubleshooting](#troubleshooting)
+[Checks](#what-it-checks) · [Quick start](#quick-start) · [Output](#output) · [Exceptions](#approved-exceptions) · [Triage](#where-to-start) · [Troubleshooting](#troubleshooting)
 
 </div>
 
@@ -41,7 +41,8 @@ Everything is one file. Copy it to a management workstation with RSAT and run it
 - [Quick start](#quick-start)
 - [Selecting checks](#selecting-checks)
 - [Output](#output)
-- [Screenshots](#screenshots)
+- [Approved exceptions](#approved-exceptions)
+- [Handling the reports](#handling-the-reports)
 - [Parameter reference](#parameter-reference)
 - [Where to start](#where-to-start)
 - [Troubleshooting](#troubleshooting)
@@ -85,7 +86,7 @@ The only side effect is LDAP load on the queried controller. In large domains, r
 
 ## What it checks
 
-39 checks across eight categories. Each one is numbered, so you can run any subset by number, range, ID or category.
+43 checks across ten categories. Each one is numbered, so you can run any subset by number, range, ID or category.
 
 ### Kerberos & delegation
 
@@ -94,62 +95,73 @@ The only side effect is LDAP load on the queried controller. In large domains, r
 | 1 | `KRB-001` | Kerberoastable accounts (SPN on user objects) | Any domain user can request a ticket and crack the password offline |
 | 2 | `KRB-002` | Kerberos pre-authentication disabled | The KDC hands out a crackable blob with no authentication at all |
 | 3 | `KRB-003` | krbtgt password age | An old key extends the life of any golden ticket indefinitely |
-| 4 | `DEL-001` | Unconstrained delegation outside DCs | The host caches every visitor's TGT — including a domain admin's |
-| 5 | `DEL-002` | Constrained delegation with protocol transition | Mint a ticket for any user; a DC service as target means game over |
-| 6 | `DEL-003` | Resource-based constrained delegation configured | Legitimate feature, favourite persistence mechanism |
+| 4 | `KRB-004` | Weak encryption (DES/RC4) on SPN and admin accounts | RC4 tickets crack orders of magnitude faster than AES; DES is broken outright |
+| 5 | `DEL-001` | Unconstrained delegation outside DCs | The host caches every visitor's TGT — including a domain admin's |
+| 6 | `DEL-002` | Constrained delegation with protocol transition | Mint a ticket for any user; a DC service as target means game over |
+| 7 | `DEL-003` | Resource-based constrained delegation configured | Legitimate feature, favourite persistence mechanism |
 
 ### Privileged accounts & passwords
 
 | # | ID | Check | Why it matters |
 | --- | --- | --- | --- |
-| 7 | `PRIV-001` | Tier-0 group membership | Includes the operator groups everyone forgets to empty |
-| 8 | `PRIV-002` | Privileged accounts without delegation protection | Credentials that can still be forwarded and reused |
-| 9 | `PRIV-003` | Orphaned adminCount flags | AdminSDHolder keeps inheritance off, permissions stop making sense |
-| 10 | `PWD-001` | Non-expiring passwords on enabled accounts | Leaked once, valid forever |
-| 11 | `PWD-002` | Accounts that may have a blank password | The domain policy is not enforced for them |
-| 12 | `PWD-003` | Passwords stored with reversible encryption | Effectively clear text inside NTDS.dit |
-| 13 | `PWD-004` | Privileged passwords older than one year | Hard-coded service credentials and forgotten break-glass accounts |
-| 14 | `PWD-005` | Default domain password policy | Length, complexity, history, lockout |
+| 8 | `PRIV-001` | Tier-0 group membership | Includes the operator groups everyone forgets to empty |
+| 9 | `PRIV-002` | Privileged accounts without delegation protection | Credentials that can still be forwarded and reused |
+| 10 | `PRIV-003` | Orphaned adminCount flags | AdminSDHolder keeps inheritance off, permissions stop making sense |
+| 11 | `PWD-001` | Non-expiring passwords on enabled accounts | Leaked once, valid forever |
+| 12 | `PWD-002` | Accounts that may have a blank password | The domain policy is not enforced for them |
+| 13 | `PWD-003` | Passwords stored with reversible encryption | Effectively clear text inside NTDS.dit |
+| 14 | `PWD-004` | Privileged passwords older than one year | Hard-coded service credentials and forgotten break-glass accounts |
+| 15 | `PWD-005` | Default domain password policy | Length, complexity, history, lockout |
 
 ### Account hygiene & infrastructure
 
 | # | ID | Check | Why it matters |
 | --- | --- | --- | --- |
-| 15 | `ACC-001` | Stale enabled user accounts | Nobody notices unusual activity on an account nobody uses |
-| 16 | `ACC-002` | Stale enabled computer accounts | Keeps its password, convenient for persistence |
-| 17 | `ACC-003` | Objects carrying SID history | A hidden access channel once the migration is done |
-| 18 | `INF-001` | MachineAccountQuota | Above zero, every user can create computer accounts |
-| 19 | `INF-002` | Domain controllers and functional levels | Legacy DCs block Protected Users and authentication policy silos |
-| 20 | `INF-003` | End-of-life operating systems | No patches, and they force weak protocols to stay enabled |
-| 21 | `INF-004` | LAPS coverage | Identical local admin passwords are the basis of lateral movement |
+| 16 | `ACC-001` | Stale enabled user accounts | Nobody notices unusual activity on an account nobody uses |
+| 17 | `ACC-002` | Stale enabled computer accounts | Keeps its password, convenient for persistence |
+| 18 | `ACC-003` | Objects carrying SID history | A hidden access channel once the migration is done |
+| 19 | `ACC-004` | Possible credentials in description/info fields | Every authenticated user can read these, and it works far too often |
+| 20 | `INF-001` | MachineAccountQuota | Above zero, every user can create computer accounts |
+| 21 | `INF-002` | Domain controllers and functional levels | Legacy DCs block Protected Users and authentication policy silos |
+| 22 | `INF-003` | End-of-life operating systems | No patches, and they force weak protocols to stay enabled |
+| 23 | `INF-004` | LAPS coverage | Identical local admin passwords are the basis of lateral movement |
+
+### Trusts & group policy
+
+| # | ID | Check | Why it matters |
+| --- | --- | --- | --- |
+| 24 | `TRUST-001` | Trust configuration: SID filtering, TGT delegation, selective auth | A trust without SID filtering lets the other side inject your Domain Admins' SIDs |
+| 25 | `GPO-001` | Stored credentials in SYSVOL (cpassword) | The decryption key is public and SYSVOL is world-readable inside the domain |
 
 ### Directory permissions
 
 | # | ID | Check | Why it matters |
 | --- | --- | --- | --- |
-| 22 | `ACL-001` | Replication rights on the domain root (DCSync) | Pull every password hash, krbtgt included, without touching a DC |
-| 23 | `ACL-002` | Dangerous permissions on tier-0 groups | Membership without appearing in the membership list |
-| 24 | `ACL-003` | Dangerous permissions on privileged accounts | Password reset or `msDS-KeyCredentialLink` write is full takeover |
-| 25 | `ACL-004` | Dangerous permissions on AdminSDHolder | One ACE stamped hourly onto every admin object in the domain |
-| 26 | `ACL-005` | Broad delegations on organizational units | The delegation wizard grants more than people intend |
-| 27 | `ACL-006` | Privileged objects with non-privileged owners | An owner can rewrite the ACL regardless of what it currently says |
-| 28 | `ACL-007` | Dangerous permissions on DC objects | Write access here is direct domain controller compromise |
-| 29 | `ACL-008` | Write access on group policy objects | Editing a GPO is code execution everywhere it applies |
-| 30 | `ACL-009` | Delegated write access on group membership | Individually harmless, collectively an escalation chain |
+| 26 | `ACL-001` | Replication rights on the domain root (DCSync) | Pull every password hash, krbtgt included, without touching a DC |
+| 27 | `ACL-002` | Dangerous permissions on tier-0 groups | Membership without appearing in the membership list |
+| 28 | `ACL-003` | Dangerous permissions on privileged accounts | Password reset or `msDS-KeyCredentialLink` write is full takeover |
+| 29 | `ACL-004` | Dangerous permissions on AdminSDHolder | One ACE stamped hourly onto every admin object in the domain |
+| 30 | `ACL-005` | Broad delegations on organizational units | The delegation wizard grants more than people intend |
+| 31 | `ACL-006` | Privileged objects with non-privileged owners | An owner can rewrite the ACL regardless of what it currently says |
+| 32 | `ACL-007` | Dangerous permissions on DC objects | Write access here is direct domain controller compromise |
+| 33 | `ACL-008` | Write access on group policy objects | Editing a GPO is code execution everywhere it applies |
+| 34 | `ACL-009` | Delegated write access on group membership | Individually harmless, collectively an escalation chain |
 
 ### Certificate services (AD CS)
 
+Forest-scoped — identical for every domain in the forest. Use `-SkipForestWide` when walking a multi-domain forest so you only run them once.
+
 | # | ID | Check | Reference |
 | --- | --- | --- | --- |
-| 31 | `ADCS-001` | Certificate services inventory (CAs, templates, NTAuth) | — |
-| 32 | `ADCS-002` | Requester-supplied subject with an authentication EKU | ESC1 |
-| 33 | `ADCS-003` | Templates without a purpose restriction | ESC2 |
-| 34 | `ADCS-004` | Broadly enrollable enrollment agent templates | ESC3 |
-| 35 | `ADCS-005` | Write access on certificate templates | ESC4 |
-| 36 | `ADCS-006` | Dangerous permissions on PKI objects | ESC5 / ESC7 |
-| 37 | `ADCS-007` | CA accepts a subject alternative name from the request | ESC6 |
-| 38 | `ADCS-008` | Templates without the SID security extension | ESC9 |
-| 39 | `ADCS-009` | Published templates with broad enrolment rights | — |
+| 35 | `ADCS-001` | Certificate services inventory (CAs, templates, NTAuth) | — |
+| 36 | `ADCS-002` | Requester-supplied subject with an authentication EKU | ESC1 |
+| 37 | `ADCS-003` | Templates without a purpose restriction | ESC2 |
+| 38 | `ADCS-004` | Broadly enrollable enrollment agent templates | ESC3 |
+| 39 | `ADCS-005` | Write access on certificate templates | ESC4 |
+| 40 | `ADCS-006` | Dangerous permissions on PKI objects | ESC5 / ESC7 |
+| 41 | `ADCS-007` | CA accepts a subject alternative name from the request | ESC6 |
+| 42 | `ADCS-008` | Templates without the SID security extension | ESC9 |
+| 43 | `ADCS-009` | Published templates with broad enrolment rights | — |
 
 > [!NOTE]
 > Templates that exist but are published on no CA cannot be requested. They still appear in the report, rated lower — publishing one is a single click.
@@ -193,11 +205,13 @@ $errors
 .\Invoke-ADSecurityScan.ps1 -ListChecks
 ```
 
-**4. Run it.** With no arguments you get an interactive menu:
+**4. Run it.** With no arguments you get a menu of profiles and categories:
 
 ```powershell
 .\Invoke-ADSecurityScan.ps1
 ```
+
+If you would rather not choose, `-Select essential` runs the fourteen checks that matter most.
 
 Or go straight to a full scan with all three export formats:
 
@@ -211,55 +225,127 @@ Or go straight to a full scan with all three export formats:
 
 ## Selecting checks
 
-`-Select` and the interactive prompt accept any mix of the following. Combine them freely: `-Select 1-6,ADCS,PWD-002`.
+Running without arguments opens a two-level menu. The first level is three profiles and one row per category — picking "everything in Kerberos" is one keystroke, not a range you have to look up:
+
+```
+  SCAN PROFILES
+
+   1   Everything - the complete catalogue               43 checks    5 slow
+   2   Quick pass - fast checks only                     25 checks
+   3   Tier-0 essentials - paths to domain compromise    14 checks    2 slow
+
+  CATEGORIES
+
+   4   Kerberos                                          4 checks
+   5   Delegation                                        3 checks
+   6   Privileges                                        3 checks
+   7   Passwords                                         5 checks
+   8   Account hygiene                                   4 checks
+   9   Infrastructure                                    4 checks
+   10  Trusts                                            1 check
+   11  Group policy                                      1 check      1 slow
+   12  Permissions                                       9 checks     3 slow
+   13  Certificate services  (forest-wide)               9 checks     1 slow
+
+   L   List all 43 checks and pick individually
+   Q   Cancel
+
+  Select (e.g. 3, or 5,7,12):
+```
+
+Pick several with `5,7,12`. Before anything runs you get a summary of what was selected, a warning if slow checks are included, and a confirmation prompt. `L` drops into the full numbered list when you really do want individual checks.
+
+**Tier-0 essentials** is the answer to "we have twenty minutes, what matters?" — the checks where a finding is either already a compromise or one move away from one: `KRB-001`, `KRB-003`, `DEL-001`, `DEL-002`, `PRIV-001`, `PWD-002`, `PWD-003`, `TRUST-001`, `GPO-001`, `ACL-001`, `ACL-004`, `ACL-007`, `ACL-008`, `ADCS-002`.
+
+### Non-interactive selection
+
+`-Select` accepts the same profiles as the menu, plus anything more specific. Combine freely: `-Select 1-6,ADCS,PWD-002`.
 
 | Token | Selects |
 | --- | --- |
-| `all` | every check |
-| `fast` | every check marked *Fast* — a first pass in about a minute |
-| `7` | one check by number |
-| `1-14` | a range |
-| `KRB-001` | one check by ID |
-| `ACL`, `ADCS`, `PWD` | every check with that ID prefix |
+| `all` / `full` | every check |
+| `quick` / `fast` | fast checks only — a first pass in about a minute |
+| `essential` / `tier0` | the Tier-0 essentials profile |
+| `slow` | only the expensive checks, for a separate off-hours run |
+| `domain` / `forest` | by scope — `domain` skips the ADCS checks |
 | `Kerberos`, `Permissions` | a whole category by name |
+| `ACL`, `ADCS`, `PWD` | every check with that ID prefix |
+| `KRB-001` | one check by ID |
+| `7` | one check by catalogue number |
+| `1-14` | a range of catalogue numbers |
 
 Unrecognised tokens produce a warning and are skipped, so one typo in a long list does not cost you the run.
 
-Every check carries a cost class shown in the menu. *Fast* checks are single LDAP queries; *Slow* checks read one security descriptor per object and dominate the runtime.
+Every check carries a cost class shown in the menu. *Fast* checks are single LDAP queries; *Slow* checks read one security descriptor per object, or reach outside LDAP, and dominate the runtime.
 
 ---
 
 ## Output
 
-By default the script prints every finding with its affected objects, grouped and coloured by severity, and returns nothing on the pipeline. That last part is deliberate — emitting the objects as well would print a second, unreadable dump underneath the report, because PowerShell renders nested collections badly.
+While the scan runs, each check reports as it finishes — position, ID, outcome and object count, with the elapsed time shown for anything that took more than three seconds:
 
 ```
-  HIGH  --------------------------------------------------------------------
-  KRB-001   Kerberoastable accounts (user objects with an SPN)           (8)
+  ==================================================================================================
+   Active Directory Security Assessment                                                   read-only
+  ==================================================================================================
 
-      eviadmin
-        SPNs: HTTP/eviprod.example.local
-        password age: 34 days
-        privileged: no
-        CN=eviadmin,OU=DOM-USER-SERVER,OU=DOM-MGMT,DC=example,DC=local
+   Domain        contoso.local
+   Controller    dc01.contoso.local
+   Running as    CONTOSO\s.gassner
+   Stale after   90 days
+   Checks        14 of 43   (2 slow - these read a security descriptor per object)
 
-      svc-sql-prd19a-oltp
-        SPNs: MSSQLSvc/sql01.example.local:PRD19A
-        password age: 1550 days
-        privileged: no
-        CN=svc-sql-prd19a-oltp,OU=GRP-DB,OU=GROUPS-MGMT,DC=example,DC=local
+  RUNNING
+
+   [ 1/14]  KRB-001   Kerberoastable accounts (SPN on user objects) .......... HIGH        8
+   [ 2/14]  KRB-003   krbtgt password age .................................... MEDIUM      1
+   [ 3/14]  DEL-001   Unconstrained delegation outside DCs ................... CRITICAL    2
+   [ 4/14]  DEL-002   Constrained delegation with protocol transition ........ PASS        -
+   ...
+   [ 9/14]  GPO-001   Stored credentials in SYSVOL (cpassword) ............... CRITICAL    3    14s
 ```
 
-The console shows 15 objects per finding before truncating — raise it with `-MaxConsoleObjects 200`. `-Compact` collapses everything to one line per finding for a quick pass over a full scan.
+Then the findings themselves, grouped by severity. By default every affected object is listed with its attributes on separate lines and the distinguished name dimmed:
+
+```
+  CRITICAL (5) ------------------------------------------------------------------------------------
+
+   ACL-001   Replication rights on the domain root (DCSync)                                      2
+
+        CONTOSO\svc-legacy-sync
+          FULL REPLICATION POSSIBLE
+          rights: DS-Replication-Get-Changes, DS-Replication-Get-Changes-All
+          CN=svc-legacy-sync,OU=Service,DC=contoso,DC=local
+```
+
+And a result block with a rough distribution, followed by the file paths:
+
+```
+  RESULT
+
+   Critical     5  ##############
+   High         3  #########
+   Medium       1  ###
+   Pass         5  ##############
+
+   14 checks in 04:12
+
+  OUTPUT
+
+   HTML          C:\Reports\ADSecurityScan_contoso.local_20260804-1712.html
+   JSON          C:\Reports\ADSecurityScan_contoso.local_20260804-1712.json
+```
+
+The console shows 15 objects per finding before truncating — raise it with `-MaxConsoleObjects 200`. `-Compact` drops the object detail and leaves one line per finding, which is the better view for a full scan. `-Quiet` suppresses the console output entirely, for scheduled runs.
 
 | Format | Contains | Good for |
 | --- | --- | --- |
 | **Console** | findings with objects, colour-coded by severity | working through results interactively |
-| **HTML** | everything, with a check strip, severity tallies and collapsible object tables | handing over, printing to PDF, management |
+| **HTML** | everything, with a check strip, clickable severity filters, per-finding Microsoft references and collapsible object tables | handing over, printing to PDF, management |
 | **JSON** (`-IncludeJson`) | every finding and every object, untruncated | diffing runs, feeding a ticket system |
 | **CSV** (`-IncludeCsv`) | one flat row per affected object | Excel, pivot tables, assigning owners |
 
-`-PassThru` returns the finding objects. They carry proper format definitions, so they render as a clean table rather than a wall of text:
+The script returns nothing on the pipeline unless you ask. That is deliberate: emitting the objects as well would print a second, unreadable dump underneath the report, because PowerShell renders nested collections badly. `-PassThru` returns the finding objects, which carry proper format definitions and render as a clean table:
 
 ```powershell
 $f = .\Invoke-ADSecurityScan.ps1 -FullScan -PassThru -Quiet
@@ -270,17 +356,78 @@ $f | Where-Object Id -eq 'KRB-001' | Format-List
 $f | Where-Object Id -eq 'ACL-005' | Select-Object -ExpandProperty Objects | Out-GridView
 ```
 
+### The HTML report
+
+Two things in the report are worth knowing about.
+
+**The severity tallies are clickable.** Findings are grouped by category, so a severity is scattered across sections — clicking *Critical* filters the whole report down to those findings and jumps to them, which is what actually produces "the Critical section". Click the same tally again, or use *show all*, to go back. Printing always resets the filter first, so a filtered view can never turn into a silently incomplete PDF.
+
+**Every finding links to Microsoft documentation.** Not to explain the finding — the report already does that — but to answer "where do I go to change this". `KRB-001` points at the gMSA overview, `ACL-004` at the AdminSDHolder appendix, `GPO-001` at the MS14-025 article that contains the cleanup script, `ADCS-008` at KB5014754.
+
+Where Microsoft has no single canonical page for a topic, the link opens a Microsoft Learn search with precise terms instead of a guessed URL that would rot into a 404. Every direct link was verified to resolve at the time of writing.
+
+The references are on the finding objects too, so `-PassThru` gives you them as data:
+
+```powershell
+$f = .\Invoke-ADSecurityScan.ps1 -Select essential -PassThru -Quiet -NoReport
+$f | Select-Object Id, Severity, @{n='Doc';e={$_.Reference.Url}}
+```
+
 ---
 
-## Screenshots
+## Approved exceptions
 
-![HTML report overview](screenshots/report_1.PNG)
+The first full scan of a domain that has never been assessed finds things that turn out to be intentional. If the report flags your Entra Connect account as a critical DCSync finding on every run, people stop reading it — and stop noticing the real findings sitting next to it.
 
-*The HTML report: check strip across the top, severity tallies, then findings grouped by category.*
+Put a file called `ADSecurityScan.exceptions.json` next to the script and it is picked up automatically:
 
-![Finding detail](screenshots/report_2.PNG)
+```json
+{
+  "exceptions": [
+    {
+      "checkId": "ACL-001",
+      "object": "CONTOSO\\svc-entraconnect",
+      "reason": "Entra Connect sync account. DCSync is required by the product; treated as tier 0.",
+      "approvedBy": "Security Board, ticket CHG-2041",
+      "expires": "2026-12-31"
+    }
+  ]
+}
+```
 
-*Each finding carries a plain-language summary, a concrete remediation, and the full list of affected objects.*
+| Field | Meaning |
+| --- | --- |
+| `checkId` | Exact ID or wildcard — `ACL-001`, `ACL-*` |
+| `object` | Matched with `-like` against both the object name and its distinguished name, so `svc-sql-prd*` works |
+| `reason` | Why this is accepted, written for whoever reads it in a year |
+| `approvedBy` | Who signed it off |
+| `expires` | `yyyy-MM-dd` — the date the acceptance runs out |
+
+> [!IMPORTANT]
+> **All four fields are mandatory, including the expiry date.** There is deliberately no way to write an exception that never expires. A permanent exception is not an accepted risk, it is a blind spot nobody revisits — and it will still be there long after the person who approved it has left.
+
+Expired entries stop suppressing anything, so the finding reappears at full severity. Every run adds an `EXC-001` finding listing what is currently suppressed, what has expired and what expires within 30 days, which makes the exception file itself auditable.
+
+When every object in a finding is covered, the finding drops to `Pass` with a note. That is the point: a report that **can** reach all-green is a report worth reading.
+
+Use `-ExceptionFile` to point somewhere else, or `-NoExceptions` to ignore the file for one run. See `ADSecurityScan.exceptions.example.json` for a fuller example.
+
+---
+
+## Handling the reports
+
+> [!WARNING]
+> **The output is a ready-made target list.** Kerberoastable service accounts with password ages, hosts with unconstrained delegation, who holds DCSync, which certificate template lets any user request a Domain Admin certificate — this is precisely the reconnaissance an attacker would otherwise have to perform themselves, sorted by usefulness.
+
+Treat the reports like credentials, not like documentation:
+
+- Do not leave them in `Downloads`, on a file share, or in a ticket everyone can read.
+- Do not send them by mail. Share a location, not an attachment.
+- Never commit them — the supplied `.gitignore` excludes `ADSecurityScan_*` for exactly this reason.
+- Store them where the tier-0 data lives, and delete them when the remediation is done.
+- The scan itself is read-only and harmless. The output is not.
+
+Two checks are careful about this by design: `ACC-004` reports only which keyword matched, never the field contents, and `GPO-001` reports file paths without decrypting anything. Neither turns the report into the thing it warns about.
 
 ---
 
@@ -349,7 +496,10 @@ The *Slow* checks read one security descriptor per object. In a domain with 100,
 The script deliberately uses ASCII only, but if you have modified it: PowerShell 5.1 consoles run on an OEM code page by default and mangle box-drawing characters. `chcp 65001` before running, or stick to ASCII.
 
 **Nothing runs and it says "Nothing selected".**
-The selection tokens matched no checks. Run `-ListChecks` to see the catalogue, and note that category names must match (`Permissions`, not `ACLs`) while ID prefixes are separate (`ACL`, `ADCS`, `PWD`).
+The selection tokens matched no checks. Run `-ListChecks` to see the catalogue. Category names must match the catalogue (`Permissions`, not `ACLs`), while ID prefixes are separate tokens (`ACL`, `ADCS`, `PWD`).
+
+**In the menu I typed a range and got the wrong checks.**
+You cannot — the menu refuses ranges and tells you why. At the top level `1` means the first profile, so `1-3` would be ambiguous between menu rows and check numbers. Press `L` first; inside the full list, ranges refer unambiguously to catalogue numbers.
 
 ---
 
@@ -373,6 +523,9 @@ The selection tokens matched no checks. Run `-ListChecks` to see the catalogue, 
 - Trust relationships and cross-forest paths are out of scope.
 - One domain per run. In a multi-domain forest, call it once per domain with `-Server`.
 - Severity thresholds (how many tier-0 members is "too many", how old a password is "stale") are experience-based defaults. Adjust them to your environment rather than treating them as standards.
+- `ACC-004` is a keyword search and will produce false positives — a description reading "reset password at first logon" matches. That is intended; each hit costs a glance, a missed clear-text credential costs more.
+- `GPO-001` needs SMB access to SYSVOL. It reports the presence and location of stored credentials and deliberately does not decrypt them.
+- `TRUST-001` reports the trust configuration this domain can see. It says nothing about how well the domain on the other side is run.
 - This is an assessment aid. It deliberately changes nothing — remediation stays a conscious, reviewed action.
 
 ---
@@ -380,15 +533,14 @@ The selection tokens matched no checks. Run `-ListChecks` to see the catalogue, 
 ## Repository layout
 
 ```
-README.md                     this file
-LICENSE                       MIT
-.gitignore                    keeps generated reports and exports out of git
-.github/workflows/            CI: PSScriptAnalyzer on every push
-screenshots/                  images used in this README
-Invoke-ADSecurityScan.ps1     the scanner — everything is in this one file
+README.md                                 this file
+LICENSE                                   MIT
+.gitignore                                keeps generated reports out of git
+ADSecurityScan.exceptions.example.json    template for approved exceptions
+Invoke-ADSecurityScan.ps1                 the scanner — everything is in this one file
 ```
 
-The script has no dependencies beyond the RSAT `ActiveDirectory` module and needs no build step. Download the single file, unblock it, run it.
+The scanner has no dependencies beyond the RSAT `ActiveDirectory` module and needs no build step. Download the single file, unblock it, run it — everything else in the repository is for development or optional configuration.
 
 ## License
 
