@@ -121,7 +121,7 @@ Templates that exist but are not published on any CA cannot be requested. They s
 Files downloaded from the internet carry a zone marker that stops PowerShell from running them, so unblock the script first:
 
 ```powershell
-Unblock-File .\Invoke-ADSecurityScan.ps1
+Unblock-File .\ADSecurityScan.ps1
 ```
 
 You can check that it parses without executing anything:
@@ -129,21 +129,21 @@ You can check that it parses without executing anything:
 ```powershell
 $errors = $null
 [System.Management.Automation.Language.Parser]::ParseFile(
-    (Resolve-Path .\Invoke-ADSecurityScan.ps1), [ref]$null, [ref]$errors) | Out-Null
+    (Resolve-Path .\ADSecurityScan.ps1), [ref]$null, [ref]$errors) | Out-Null
 $errors
 ```
 
 List the checks, then run it. Without arguments you get a menu of profiles and categories:
 
 ```powershell
-.\Invoke-ADSecurityScan.ps1 -ListChecks
-.\Invoke-ADSecurityScan.ps1
+.\ADSecurityScan.ps1 -ListChecks
+.\ADSecurityScan.ps1
 ```
 
 `-Select essential` runs the fourteen Tier-0 checks. A full scan with all export formats:
 
 ```powershell
-.\Invoke-ADSecurityScan.ps1 -FullScan -OutputPath C:\Reports -IncludeJson -IncludeCsv
+.\ADSecurityScan.ps1 -FullScan -OutputPath C:\Reports -IncludeJson -IncludeCsv
 ```
 
 The HTML report is written to the output directory as `ADSecurityScan_<domain>_<timestamp>.html`. It has everything inlined, so it opens offline and prints to PDF.
@@ -200,7 +200,7 @@ In the HTML report, clicking a severity tally filters the report to that severit
 The script returns nothing on the pipeline by default, because PowerShell would print the nested objects as a second, unreadable dump. `-PassThru` returns the finding objects with proper formatting, including the references:
 
 ```powershell
-$f = .\Invoke-ADSecurityScan.ps1 -FullScan -PassThru -Quiet
+$f = .\ADSecurityScan.ps1 -FullScan -PassThru -Quiet
 
 $f                                                    # table: Severity, ID, Objects, Check
 $f | Where-Object Severity -eq 'Critical'
@@ -209,7 +209,7 @@ $f | Where-Object Id -eq 'ACL-005' | Select-Object -ExpandProperty Objects | Out
 ```
 
 ```powershell
-$f = .\Invoke-ADSecurityScan.ps1 -Select essential -PassThru -Quiet -NoReport
+$f = .\ADSecurityScan.ps1 -Select essential -PassThru -Quiet -NoReport
 $f | Select-Object Id, Severity, @{n='Doc';e={$_.Reference.Url}}
 ```
 
@@ -295,7 +295,7 @@ A first scan of a domain that was never assessed finds a lot. Working through it
 ## Troubleshooting
 
 **`File cannot be loaded because running scripts is disabled on this system.`**
-Execution policy. Run `powershell.exe -ExecutionPolicy Bypass -File .\Invoke-ADSecurityScan.ps1`, or `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` for the current session. A file from a browser or mail attachment also needs `Unblock-File .\Invoke-ADSecurityScan.ps1`; the zone marker is separate from the execution policy.
+Execution policy. Run `powershell.exe -ExecutionPolicy Bypass -File .\ADSecurityScan.ps1`, or `Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass` for the current session. A file from a browser or mail attachment also needs `Unblock-File .\ADSecurityScan.ps1`; the zone marker is separate from the execution policy.
 
 **`The ActiveDirectory module was not found.`**
 Install the RSAT module as shown under [Requirements](#requirements). The script needs only that module, not all of RSAT.
